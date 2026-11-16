@@ -1,0 +1,38 @@
+# eclipse
+bin
+*.launch
+.settings
+.metadata
+.classpath
+.project
+
+# idea
+out
+*.ipr
+*.iws
+*.iml
+.idea
+
+# gradle
+build
+.gradle
+
+# python
+__pycache__
+*.pyc
+.ruff_cache
+.pytest_cache
+
+# other
+eclipse
+run
+runs
+run-data
+
+repo
+
+# materializePythonRuntime writes into runs/, and this is the link into it a type checker reads
+typings
+
+# NeoGradle writes one launch configuration per machine, with this machine's paths in it
+.vscode/launch.json
