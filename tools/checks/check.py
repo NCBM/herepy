@@ -1,6 +1,6 @@
 """Check the Python half of HerePy against the facts its records claim, using the shipped interpreter.
 
-    runs/client/python/bin/python3.13 tools/checks/check.py      # python.exe on Windows
+    runs/client/python/bin/python3 tools/checks/check.py      # python.exe on Windows
 
 The check runs without Minecraft: `java.lang` is stood in for, and everything else is the real package in the
 runtime tree. Its cases are the ones the evidence table in `docs/adr/README.md` names, so a row there stays a claim

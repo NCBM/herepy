@@ -16,7 +16,7 @@ that restates it is a bug in this file.
 ```
 
 ```bash
-runs/client/python/bin/python3.13 tools/checks/check.py   # the Python half, no Minecraft needed
+runs/client/python/bin/python3 tools/checks/check.py   # the Python half, no Minecraft needed
 ./gradlew installUnits          # src/units -> each run directory's mods/, where discovery reads them (ADR 0018)
 ./gradlew materializePythonRuntime            # dev runtime: full base + packs, herecraft symlinked into src/
 ./gradlew materializePythonRuntime -Ppackage  # the shipped shape: removals applied, precompiled, no packs

@@ -37,11 +37,11 @@ number and its words.
 ## How these were checked
 
 The decisions that a run could settle were settled by one, on the runtime this repository ships
-(`runs/client/python/bin/python3.13`, CPython 3.13.18 since 0014). A case lives either in the record that depends on
+(`runs/client/python/bin/python3`, the interpreter ADR 0014 pins). A case lives either in the record that depends on
 it or in [`tools/checks/check.py`](../../tools/checks/check.py), which the shipped interpreter re-runs:
 
 ```bash
-runs/client/python/bin/python3.13 tools/checks/check.py
+runs/client/python/bin/python3 tools/checks/check.py
 ```
 
 | Decision | What was measured |

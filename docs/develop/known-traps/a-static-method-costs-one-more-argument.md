@@ -52,6 +52,6 @@ return self.item == other.item
 ## How this was measured
 
 The signatures come from `Class.getMethods()` over the client's NeoForm classpath, with `Class.forName(name, false,
-loader)` so no static initializer runs. The calls ran through jep 4.4.0 on CPython 3.13.18, the runtime this
-repository pins (ADR 0014). `tools/checks/check.py` covers none of this: it stands in for `java.lang` and runs
-without jep.
+loader)` so no static initializer runs. The calls ran through jep 4.4.0 on the interpreter this repository pins, whose
+version `runtime/manifest.toml` states (ADR 0014). `tools/checks/check.py` covers none of this: it stands in for
+`java.lang` and runs without jep.
