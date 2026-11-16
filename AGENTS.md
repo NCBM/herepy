@@ -48,5 +48,5 @@ ruff check src/herecraft/ && ruff format --check src/herecraft/ && basedpyright 
 | who owns each phase of a load, and what a script pack is | ADR [0018](docs/adr/0018-each-loading-phase-has-one-owner.md) |
 | which side a unit's code belongs to, and what a reload keeps | ADR [0017](docs/adr/0017-side-is-declared-by-where-code-runs.md) |
 | the Java/Python boundary as a protocol | ADR [0002](docs/adr/0002-the-java-python-boundary-is-a-versioned-protocol.md) |
-| a Java call jep refuses although the signature looks right | [`docs/develop/known-traps/`](docs/develop/known-traps/README.md), with the jep source line that decides it |
+| a Java call jep refuses, or a command that parses and then runs nothing | [`docs/develop/known-traps/`](docs/develop/known-traps/README.md), each with the source line or bytecode that decides it |
 | how a decision gets made or changed | ADR [0001](docs/adr/0001-decisions-are-recorded-here.md) |
