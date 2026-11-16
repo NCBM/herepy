@@ -32,6 +32,15 @@ runs/client/python/bin/python3.13 tools/checks/check.py   # the Python half, no 
 ruff check src/herecraft/ && ruff format --check src/herecraft/ && basedpyright src/herecraft/
 ```
 
+## Writing
+
+Docs, code comments and commit messages carry statements: the subject and the claim come first, the reason follows. An
+invariant may be stated negatively (`a field set after the attach is never read`); wording that sets one reading against
+another (`although`, `rather than`, `not X but Y`) stays out.
+
+A commit message reads `scope: statement`, then one paragraph giving the reason, in the state the change leaves the
+tree. The exploration that produced it does not appear.
+
 ## Where the truth is
 
 | What you need to know | Where it is written |
