@@ -1,0 +1,1097 @@
+// Materializes the Python runtime HerePy embeds: it does to disk what runtime/manifest.toml says (ADR 0014).
+//
+//   ./gradlew materializePythonRuntime              dev: the whole base plus every pack, `herecraft` symlinked
+//   ./gradlew materializePythonRuntime -Ppackage    the shipped shape: removals applied, no packs, `herecraft` copied
+//   ./gradlew materializePythonRuntime -Ppack=numpy  which packs, when the mode's default is not what you want
+//   ./gradlew materializePythonRuntime -Pforce      redo it even though the marker says it is current
+//
+// The manifest is read by the small TOML reader below: tables, tables of tables, quoted strings, arrays of
+// quoted strings, comments. Anything else is a build failure rather than a silently wrong runtime, so a
+// manifest that grows a feature Gradle cannot read says so loudly.
+
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        // A tar walk is the one thing the JDK does not have, and reading the embedded runtime's tar.gz is a
+        // build-time job: nothing here ships in the mod (ADR 0014). commons-codec is what 1.26 links against.
+        classpath 'org.apache.commons:commons-compress:1.26.0'
+        classpath 'commons-codec:commons-codec:1.17.1'
+    }
+}
+
+import java.nio.file.FileSystems
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.PathMatcher
+import java.nio.file.attribute.PosixFilePermission
+import java.security.MessageDigest
+import java.util.zip.GZIPInputStream
+import java.util.zip.ZipInputStream
+
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
+import org.apache.commons.compress.archivers.tar.TarConstants
+import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream
+
+// ------------------------------------------------------------------------------------------- the tasks
+
+def manifestFile = file('runtime/manifest.toml')
+
+// Builds one Windows target's tree and smokes it; `packageWindowsRuntime` archives what it built (ADR 0015).
+tasks.register('wineJepSmoke') {
+    group = 'herepy'
+    description = 'Build a Windows target from the pins and smoke it in a Windows JVM under Wine (ADR 0016). ' +
+            'Needs -PwinJdk=<an unpacked Windows JDK 21>; -Ppackage builds the shape that ships.'
+    notCompatibleWithConfigurationCache('runs wine, cl and javac against a downloaded tree')
+    doLast {
+        this.buildWindowsRuntime(this.parseManifest(manifestFile), this.windowsTarget(), this.windowsJdk(),
+                this.windowsWork(), this.project.hasProperty('package'))
+    }
+}
+
+tasks.register('packagePythonRuntime') {
+    group = 'herepy'
+    description = 'Archive the materialized runtime into build/dist/<name>.tar.gz (ADR 0015).'
+    notCompatibleWithConfigurationCache('archives the tree a previous task wrote')
+    doLast {
+        Map manifest = this.parseManifest(manifestFile)
+        File runtime = this.file(manifest.runtime.home)
+        String state = this.runtimeState(manifest, 'package', manifestFile)
+        File marker = new File(runtime, this.markerName())
+        if (!marker.isFile() || marker.text.trim() != state) {
+            throw new GradleException("${runtime} is not the shipped shape: run " +
+                    "`./gradlew materializePythonRuntime -Ppackage` first")
+        }
+        this.writeDigest(this.writeArchive(manifest, this.platformKey(), runtime))
+    }
+}
+
+tasks.register('packageWindowsRuntime') {
+    group = 'herepy'
+    description = 'Archive a Windows target built by wineJepSmoke -Ppackage, then boot the archive (ADR 0015). ' +
+            'Needs the same -PwinJdk=<dir> the smoke ran with.'
+    notCompatibleWithConfigurationCache('archives the tree a previous task wrote, then boots it under Wine')
+    doLast {
+        Map manifest = this.parseManifest(manifestFile)
+        String target = this.windowsTarget()
+        File runtime = new File(this.windowsWork(), 'runtime')
+        this.checkWindowsShape(runtime, manifest, this.runtimeState(manifest, 'package', manifestFile))
+        File archive = this.writeArchive(manifest, target, runtime)
+        // The digest is written last: an archive that did not boot is not one to hand someone a checksum for.
+        this.checkArchiveBoots(archive, manifest)
+        this.writeDigest(archive)
+    }
+}
+
+tasks.register('checkPythonRuntime') {
+    group = 'herepy'
+    description = 'Print what the manifest says and what runs/client/python currently is.'
+    // It reads a file and prints; the configuration cache has nothing to reuse here, and storing the action
+    // would mean serializing this script.
+    notCompatibleWithConfigurationCache('reads the manifest and the runtime tree at execution time')
+    doLast {
+        Map manifest = this.parseManifest(manifestFile)
+        String platform = this.platformKey()
+        Map asset = manifest.base.assets[platform]
+        if (asset == null) {
+            throw new GradleException("runtime/manifest.toml has no base asset for ${platform}")
+        }
+        this.logger.lifecycle("manifest : ${manifest.base.project} ${manifest.base.version} " +
+                "(${manifest.base.variant}, ${manifest.base.format}), tag ${manifest.base.tag}")
+        this.logger.lifecycle("platform : ${platform}")
+        this.logger.lifecycle("asset    : ${asset.asset}")
+        this.logger.lifecycle("sha256   : ${asset.sha256}")
+        this.logger.lifecycle("removals : ${manifest['package'].collect { family, table -> "${family}=${table.remove.size()}" }.join(', ')}")
+        manifest.build.each { String name, Map step ->
+            this.logger.lifecycle("build    : ${name} ${step.version} (compiled here, not fetched — this task " +
+                    'carries an existing one over)')
+        }
+
+        manifest.pack.each { String name, Map pack ->
+            boolean hasWheel = pack.wheels?.get(platform) != null
+            this.logger.lifecycle("pack     : ${name} ${pack.version} -> ${pack.lands_in}" +
+                    (hasWheel ? '' : " (no wheel for ${platform})"))
+        }
+        File marker = new File(this.file(manifest.runtime.home), this.markerName())
+        this.logger.lifecycle(marker.exists()
+                ? "installed: ${marker.readLines('UTF-8').join(' ')}"
+                : "installed: nothing — ${marker} is absent, so this runtime was not made by this task")
+    }
+}
+
+tasks.register('materializePythonRuntime') {
+    group = 'herepy'
+    description = 'Build the embedded Python runtime from runtime/manifest.toml (ADR 0014).'
+    // Downloads, verifies and writes outside the build directory, on purpose: a cached "already done" would
+    // be a decision about a tree the cache does not own.
+    notCompatibleWithConfigurationCache('writes runs/client/python and downloads a pinned artifact')
+    doLast {
+        Map manifest = this.parseManifest(manifestFile)
+        boolean packaged = this.project.hasProperty('package')
+        boolean forced = this.project.hasProperty('force')
+        List<String> askedFor = this.project.hasProperty('pack')
+                ? this.project.property('pack').toString().split(',').collect { it.trim() }
+                : null
+
+        String platform = this.platformKey()
+        Map asset = manifest.base.assets[platform]
+        if (asset == null) {
+            throw new GradleException("runtime/manifest.toml has no base asset for ${platform}")
+        }
+
+        File runtime = this.file(manifest.runtime.home)
+        File marker = new File(runtime, this.markerName())
+        String state = this.runtimeState(manifest, packaged ? 'package' : 'dev', manifestFile)
+        if (!forced && marker.exists() && marker.text.trim() == state) {
+            this.logger.lifecycle("Python runtime is already ${manifest.base.version} " +
+                    "(${packaged ? 'package' : 'dev'}): nothing to do. -Pforce redoes it.")
+            return
+        }
+
+        File cache = this.file('build/runtime-cache')
+        String url = manifest.base.url
+                .replace('{tag}', manifest.base.tag)
+                .replace('{asset}', asset.asset)
+
+        // Everything that can fail on the network happens before the tree is touched: a half-materialized
+        // runtime is worse than the old one.
+        File archive = this.fetch(cache, url, asset.asset, asset.sha256)
+        this.logger.lifecycle("base     : ${asset.asset} (${archive.length()} bytes, sha256 verified)")
+
+        Map<String, File> wheels = [:]
+        manifest.pack.each { String name, Map pack ->
+            boolean wanted = askedFor == null ? !packaged : askedFor.contains(name)
+            if (!wanted) {
+                return
+            }
+            Map wheel = pack.wheels?.get(platform)
+            if (wheel == null) {
+                this.logger.warn("pack     : ${name} has no wheel for ${platform}, left out")
+                return
+            }
+            wheels[name] = this.fetch(cache, wheel.url, this.fileNameOf(wheel.url), wheel.sha256)
+        }
+
+        // A python-build-standalone archive is one `python/` tree: what goes into the runtime is its contents,
+        // not the wrapper directory.
+        File stage = this.file('build/runtime-stage')
+        this.deleteTree(stage)
+        stage.mkdirs()
+        this.extractTarGz(archive, stage)
+        File tree = this.singleDirectory(stage)
+
+        // The artifact ships no `__pycache__`, so the packaged tree would write into itself on first import
+        // (ADR 0014). Compiling here, in the stage, is the last moment an interpreter is still available: the
+        // removals take `bin/` away.
+        if (packaged) {
+            int compiled = this.precompile(tree, manifest.runtime.abi, [])
+            this.logger.lifecycle("package  : precompiled ${compiled} modules")
+        }
+
+        // jep is sdist-only and compiled against this runtime (the manifest's `[build.jep]`), so it cannot be
+        // fetched as a pinned binary: what the tree already has is carried across the swap below.
+        File sitePackages = new File(runtime, "lib/python${manifest.runtime.abi}/site-packages")
+        List<File> carried = (sitePackages.listFiles() ?: [])
+                .findAll { File entry -> entry.name == 'jep' || entry.name.startsWith('jep-') }
+        File stash = this.file('build/runtime-carry')
+        this.deleteTree(stash)
+        stash.mkdirs()
+        carried.each { File entry -> entry.renameTo(new File(stash, entry.name)) }
+
+        // An install tree's own directories are what gets replaced. `scripts/` and `typings/` sit beside them
+        // and belong to the dev tree, not to the artifact, so they survive a re-materialization.
+        ['lib', 'bin', 'share', 'include'].each { String name ->
+            this.deleteTree(new File(runtime, name))
+        }
+        runtime.mkdirs()
+        tree.listFiles().each { File child ->
+            Files.move(child.toPath(), new File(runtime, child.name).toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }
+        this.deleteTree(stage)
+
+        // A runtime without jep cannot start Python at all, so its absence is said out loud.
+        carried.each { File entry ->
+            File kept = new File(stash, entry.name)
+            if (!kept.renameTo(new File(sitePackages, entry.name))) {
+                throw new GradleException("could not carry ${entry.name} back into ${sitePackages}")
+            }
+        }
+        if (carried.isEmpty()) {
+            this.logger.warn("jep      : none in the runtime, and it is not fetchable as a binary — build it " +
+                    "(see [build.jep] in runtime/manifest.toml and ADR 0011)")
+        } else {
+            this.logger.lifecycle("jep      : carried over (${carried.collect { it.name }.join(', ')})")
+        }
+
+        if (packaged) {
+            Map removals = manifest['package'][this.packageFamily(platform)]
+            if (removals == null) {
+                throw new GradleException("runtime/manifest.toml has no removals for ${platform}")
+            }
+            int removed = this.applyRemovals(runtime, removals.remove)
+            this.logger.lifecycle("package  : removed ${removed} paths the shipped runtime does without")
+        }
+
+        wheels.each { String name, File wheelFile ->
+            Map pack = manifest.pack[name]
+            this.unpackWheel(wheelFile, new File(runtime, pack.lands_in), (pack.without ?: []) as List<String>)
+            this.logger.lifecycle("pack     : ${name} ${pack.version} into ${pack.lands_in}")
+        }
+
+        this.installHerecraft(runtime, manifest.runtime.abi, packaged, this.file('src/herecraft'))
+        marker.text = state + '\n'
+        this.logger.lifecycle("Python runtime ${manifest.base.version} (${packaged ? 'package' : 'dev'}) " +
+                "is in place at ${runtime}")
+    }
+}
+
+// -------------------------------------------------------------------------------------- the Windows target
+
+/** `-Ptarget`, defaulting to the Windows target this machine can build. */
+private String windowsTarget() {
+    String target = this.project.hasProperty('target')
+            ? this.project.property('target').toString()
+            : 'windows-x86_64'
+    if (!target.startsWith('windows-')) {
+        throw new GradleException("only Windows targets are built here, not ${target}")
+    }
+    return target
+}
+
+/**
+ * `-PwinJdk`, checked for what a Windows build needs from it: `javac` for jep's JNI headers, `cl` for the
+ * extension itself, and a JVM under Wine to run the probe in.
+ */
+private File windowsJdk() {
+    if (!this.project.hasProperty('winJdk')) {
+        throw new GradleException('a Windows target needs an unpacked Windows JDK 21: ' +
+                '-PwinJdk=<a directory holding bin/java.exe, include/ and lib/jvm.lib>')
+    }
+    File jdk = this.file(this.project.property('winJdk').toString())
+    ['bin/java.exe', 'lib/jvm.lib'].each { String part ->
+        if (!new File(jdk, part).isFile()) {
+            throw new GradleException("${jdk} has no ${part}, so it is not an unpacked Windows JDK")
+        }
+    }
+    return jdk
+}
+
+/** Where a target is built. One directory per target, and nothing in it is checked in. */
+private File windowsWork() {
+    return new File(this.file('build'), this.windowsTarget())
+}
+
+/**
+ * Build one Windows target's tree from the pins, and smoke it in a Windows JVM under Wine.
+ *
+ * The order is the decision. jep compiles against `include/` and `libs/python313.lib`, so the removals that take
+ * both away come after it; `compileall` comes after them, so it compiles what is left rather than what it is
+ * about to delete; and the probe comes last, so what it starts is what would ship (ADR 0016).
+ */
+private void buildWindowsRuntime(Map manifest, String target, File jdk, File work, boolean shipped) {
+    File cache = this.file('build/runtime-cache')
+    File runtime = new File(work, 'runtime')
+    this.deleteTree(runtime)
+    runtime.mkdirs()
+    work.mkdirs()
+
+    // 1. The base runtime, exactly as the manifest pins it.
+    Map asset = manifest.base.assets[target]
+    if (asset == null) {
+        throw new GradleException("runtime/manifest.toml has no base asset for ${target}")
+    }
+    String url = manifest.base.url.replace('{tag}', manifest.base.tag).replace('{asset}', asset.asset)
+    File archive = this.fetch(cache, url, asset.asset, asset.sha256)
+    File stage = new File(work, 'stage')
+    this.deleteTree(stage)
+    stage.mkdirs()
+    this.extractTarGz(archive, stage)
+    File tree = this.singleDirectory(stage)
+    tree.listFiles().each { File child ->
+        Files.move(child.toPath(), new File(runtime, child.name).toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
+    this.deleteTree(stage)
+    this.logger.lifecycle("runtime  : ${asset.asset} into ${runtime}")
+
+    // 2. numpy, from the wheel pinned for this target.
+    Map pack = manifest.pack.numpy
+    Map wheel = pack.wheels?.get(target)
+    if (wheel == null) {
+        throw new GradleException("runtime/manifest.toml has no numpy wheel for ${target}")
+    }
+    File wheelFile = this.fetch(cache, wheel.url, this.fileNameOf(wheel.url), wheel.sha256)
+    this.unpackWheel(wheelFile, new File(runtime, 'Lib/site-packages'), (pack.without ?: []) as List<String>)
+    this.logger.lifecycle("numpy    : ${pack.version} from ${this.fileNameOf(wheel.url)}")
+
+    // 3. jep: the pinned sdist, JNI headers from its own Java sources, then MSVC.
+    Map jep = manifest.build.jep
+    File sdist = this.fetch(cache, jep.sdist, this.fileNameOf(jep.sdist), jep.sha256)
+    File jepStage = new File(work, 'jep-stage')
+    this.deleteTree(jepStage)
+    jepStage.mkdirs()
+    this.extractTarGz(sdist, jepStage)
+    File jepSrc = this.singleDirectory(jepStage)
+    this.logger.lifecycle("jep      : ${jepSrc.name} from ${this.fileNameOf(jep.sdist)}")
+
+    // The jar and the Python half of jep come from the dev tree: only the native half is per target, which is
+    // why this needs a materialized runtime to build from and produces no second copy of the Python side.
+    File devJep = new File(this.file(manifest.runtime.home),
+            "lib/python${manifest.runtime.abi}/site-packages/jep".toString())
+    File jepJar = new File(devJep, "jep-${jep.version}.jar")
+    if (!jepJar.isFile()) {
+        throw new GradleException("${jepJar} is missing: run `./gradlew materializePythonRuntime` first — " +
+                'the jar and the Python half of jep come from the dev tree, the native half is built here')
+    }
+    File headers = new File(work, 'jni')
+    this.deleteTree(headers)
+    headers.mkdirs()
+    List<String> javaSources = []
+    new File(jepSrc, 'src/main/java').eachFileRecurse { File file ->
+        if (file.name.endsWith('.java')) {
+            javaSources << file.absolutePath
+        }
+    }
+    this.runTool([this.javaTool('javac'), '-nowarn', '-h', headers.absolutePath, '-cp', jepJar.absolutePath,
+                  '-d', new File(work, 'jni-out').absolutePath] + javaSources, work)
+
+    File jepPackage = new File(runtime, 'Lib/site-packages/jep')
+    jepPackage.mkdirs()
+    // MSVC names the object after the source's basename, so two `.c` files called the same thing collide and
+    // one of them is silently dropped (LNK4042, and then a missing symbol). The copy is flat and unique.
+    File flat = new File(work, 'c')
+    this.deleteTree(flat)
+    flat.mkdirs()
+    File cRoot = new File(jepSrc, 'src/main/c')
+    List<String> sources = []
+    cRoot.eachFileRecurse { File file ->
+        if (file.name.endsWith('.c')) {
+            String relative = cRoot.toPath().relativize(file.toPath()).toString()
+            File copy = new File(flat, relative.replace(File.separatorChar, '_' as char))
+            Files.copy(file.toPath(), copy.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            sources << copy.absolutePath
+        }
+    }
+    this.logger.lifecycle("jep      : ${sources.size()} sources")
+    // Everything cl makes beside the output — objects, and the import library beside the DLL — stays in
+    // `work`: what lands in site-packages is the extension and nothing else.
+    String binary = new File(jepPackage, 'jep.pyd').absolutePath
+    List<String> command = [this.msvcTool('cl'), '/nologo', '/LD', '/O2', '/W0', '/DPACKAGE=jep',
+                            '/DUSE_DEALLOC=1', '/DJEP_NUMPY_ENABLED=1', "/DVERSION=\"${jep.version}\"",
+                            '/DPYTHON_LDLIBRARY="python313.dll"', '/DWIN32=1', '/D_CRT_SECURE_NO_WARNINGS=1',
+                            "/I${jdk.absolutePath}/include", "/I${jdk.absolutePath}/include/win32",
+                            "/I${runtime.absolutePath}/include", "/I${headers.absolutePath}",
+                            "/I${jepSrc.absolutePath}/src/main/c/Include",
+                            "/I${runtime.absolutePath}/Lib/site-packages/numpy/_core/include",
+                            "/Fe:${binary}"] + sources +
+            ['/link', "/LIBPATH:${jdk.absolutePath}/lib", "/LIBPATH:${runtime.absolutePath}/libs",
+             "/IMPLIB:${new File(work, 'jep.lib').absolutePath}", 'jvm.lib', 'python313.lib']
+    this.runTool(command, work)
+    if (!new File(binary).isFile()) {
+        throw new GradleException("cl did not produce ${binary}")
+    }
+    // jep is one binary under two names: the CPython extension and the library System.load takes.
+    Files.copy(Path.of(binary), Path.of(new File(jepPackage, 'jep.dll').absolutePath),
+               java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    new File(devJep, '').listFiles().each { File file ->
+        if (file.name.endsWith('.py')) {
+            Files.copy(file.toPath(), new File(jepPackage, file.name).toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }
+    }
+    Files.copy(jepJar.toPath(), new File(jepPackage, jepJar.name).toPath(),
+               java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    this.logger.lifecycle("jep      : ${new File(binary).length()} bytes, built with cl")
+
+    // The mod runs its shim by path, so `herecraft` goes where the POSIX tree puts it: inside the standard
+    // library's directory, which is on `sys.path` in both layouts (see `copyPackage`).
+    File herecraft = new File(runtime, 'Lib/herecraft')
+    this.copyPackage(herecraft, this.file('src/herecraft'))
+
+    if (shipped) {
+        Map removals = manifest['package'][this.packageFamily(target)]
+        if (removals == null) {
+            throw new GradleException("runtime/manifest.toml has no removals for ${target}")
+        }
+        int removed = this.applyRemovals(runtime, removals.remove)
+        this.logger.lifecycle("package  : removed ${removed} paths")
+        // The artifact ships no `__pycache__` for what a pack and the mod add, so the shipped tree would write
+        // into its own install directory on first import. This is the last moment an interpreter is here.
+        int compiled = this.precompile(runtime, manifest.runtime.abi, [this.wineTool()])
+        this.logger.lifecycle("package  : precompiled ${compiled} modules")
+    }
+    // The stamp `packageWindowsRuntime` asks for before it archives anything (see `checkWindowsShape`).
+    new File(runtime, this.markerName()).text =
+            this.runtimeState(manifest, shipped ? 'package' : 'dev', this.file('runtime/manifest.toml')) + '\n'
+
+    // 4. The probe, and a Windows JVM under Wine to run it in.
+    runProbe(manifest, jdk, work, runtime)
+}
+
+/**
+ * Load `jep.dll` in a Windows JVM under Wine and start the runtime's own interpreter: the whole Java→Python path
+ * this target has, short of the game.
+ *
+ * It takes a runtime rather than a tree it built, because the archive task points it at an extracted archive: the
+ * smoke of what would ship, not of what was built.
+ */
+private void runProbe(Map manifest, File jdk, File work, File runtime) {
+    File jepPackage = new File(runtime, 'Lib/site-packages/jep')
+    File jepJar = new File(jepPackage, "jep-${manifest.build.jep.version}.jar")
+    File probeOut = new File(work, 'probe')
+    this.deleteTree(probeOut)
+    probeOut.mkdirs()
+    this.runTool([this.javaTool('javac'), '-nowarn', '-cp', jepJar.absolutePath, '-d', probeOut.absolutePath,
+                  this.file('tools/wine/JepProbe.java').absolutePath], work)
+    String classpath = "${this.winePath(probeOut.absolutePath)};${this.winePath(jepJar.absolutePath)}"
+    String output = this.runTool([this.wineTool(), new File(jdk, 'bin/java.exe').absolutePath, '-cp', classpath,
+                                  'JepProbe', this.winePath(new File(jepPackage, 'jep.dll').absolutePath),
+                                  this.winePath(runtime.absolutePath),
+                                  this.winePath(new File(runtime, 'python313.dll').absolutePath)], work)
+    this.logger.lifecycle(output.readLines().findAll { line ->
+        line.startsWith('python') || line.startsWith('prefix') || line.startsWith('numpy') ||
+                line.startsWith('sum') || line.startsWith('boot') || line.startsWith('probe')
+    }.join(System.lineSeparator()))
+    if (!output.contains('probe ok')) {
+        throw new GradleException("the smoke did not finish:\n${output.take(6000)}")
+    }
+}
+
+/**
+ * Extract the archive the way a client will, and boot the tree that comes out of it.
+ *
+ * A tarball hides exactly one failure well: that what was packed is not what was built. This target can afford
+ * to check it, because the check is the probe rather than the game (ADR 0016), so the archive is opened before
+ * its checksum is written.
+ */
+private void checkArchiveBoots(File archive, Map manifest) {
+    File work = this.windowsWork()
+    File unpacked = new File(work, 'unpacked')
+    this.deleteTree(unpacked)
+    unpacked.mkdirs()
+    try {
+        extractTarGz(archive, unpacked)
+        runProbe(manifest, this.windowsJdk(), work, unpacked)
+    } catch (Exception failure) {
+        // Left where it is: an archive that did not boot is worth looking inside, and only this run has it.
+        throw new GradleException("${archive} does not boot from what it packed; the tree it unpacked to is " +
+                "${unpacked}", failure)
+    }
+    this.deleteTree(unpacked)
+}
+
+/**
+ * The tree `packageWindowsRuntime` is about to archive, checked instead of trusted.
+ *
+ * The removals are asked of the manifest rather than restated here, so a removal list that grows is a check that
+ * grows with it. The positives are what a runtime that never started would not have — and `herecraft`'s
+ * `__pycache__` is the one that catches a tree nobody precompiled, which is the difference between a runtime
+ * that writes into its own install directory and one that does not.
+ */
+private void checkWindowsShape(File runtime, Map manifest, String state) {
+    File marker = new File(runtime, this.markerName())
+    if (!marker.isFile() || marker.text.trim() != state) {
+        throw new GradleException("${runtime} is not the shipped ${this.windowsTarget()} yet: run " +
+                '`./gradlew wineJepSmoke -Ppackage -PwinJdk=<dir>` first')
+    }
+    Map removals = manifest['package'].windows
+    if (removals == null) {
+        throw new GradleException("runtime/manifest.toml has no removals for the Windows layout, so it cannot " +
+                'say what this target ships')
+    }
+    List<Path> left = removalMatches(runtime, removals.remove)
+    if (!left.isEmpty()) {
+        throw new GradleException("${runtime} still holds ${left.size()} paths the manifest removes, first " +
+                "${runtime.toPath().relativize(left.first())}: it is not the shipped shape")
+    }
+    String abi = manifest.runtime.abi
+    List<String> required = ['python.exe', "python${abi.replace('.', '')}.dll".toString(),
+                             "Lib/site-packages/jep/jep-${manifest.build.jep.version}.jar",
+                             'Lib/site-packages/jep/jep.pyd', 'Lib/site-packages/numpy/__init__.py',
+                             'Lib/herecraft/__init__.py', 'Lib/herecraft/__pycache__']
+    required.each { String part ->
+        if (!new File(runtime, part).exists()) {
+            throw new GradleException("${runtime} has no ${part}: it is not a runtime that would start")
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------ the manifest
+
+static String markerName() {
+    return '.herepy-runtime'
+}
+
+/**
+ * What a tree's marker says: the pin it came from, the mode it was made in, and the manifest that decided it.
+ *
+ * The archive tasks compare a tree's marker against this rather than ask for a flag, because a stamp that is only
+ * ever written is not a check: a tree made from an older manifest is a tree nobody can say is this manifest's.
+ */
+private String runtimeState(Map manifest, String mode, File from) {
+    return "tag=${manifest.base.tag} version=${manifest.base.version} variant=${manifest.base.variant} " +
+            "mode=${mode} manifest=${sha256(from)}"
+}
+
+static Map parseManifest(File manifest) {
+    Map root = [:]
+    Map current = root
+    List<String> lines = Files.readAllLines(manifest.toPath(), java.nio.charset.StandardCharsets.UTF_8)
+    for (int index = 0; index < lines.size(); index++) {
+        String text = lines[index].replaceFirst(/#.*$/, '').trim()
+        if (text.isEmpty()) {
+            continue
+        }
+        if (text.startsWith('[[')) {
+            current = openTable(root, pathOf(text, 2, index), true, index)
+            continue
+        }
+        if (text.startsWith('[')) {
+            current = openTable(root, pathOf(text, 1, index), false, index)
+            continue
+        }
+        int equals = text.indexOf('=')
+        if (equals < 0) {
+            throw new GradleException("manifest: line ${index + 1} is neither a table nor an assignment")
+        }
+        String key = text.substring(0, equals).trim()
+        String value = text.substring(equals + 1).trim()
+        if (value.startsWith('[')) {
+            while (bracketsOf(value) > 0) {
+                index++
+                if (index >= lines.size()) {
+                    throw new GradleException("manifest: ${key} has an array that never closes")
+                }
+                value += ' ' + lines[index].replaceFirst(/#.*$/, '').trim()
+            }
+            current[key] = stringArray(value, key)
+        } else if (value.length() >= 2 && value.startsWith('"') && value.endsWith('"')) {
+            String body = value.substring(1, value.length() - 1)
+            if (body.contains('"')) {
+                throw new GradleException("manifest: ${key} has an escape this reader does not know")
+            }
+            current[key] = body
+        } else {
+            throw new GradleException("manifest: ${key} is not a quoted string or an array of them")
+        }
+    }
+    return root
+}
+
+private static int bracketsOf(String value) {
+    return value.count('[') - value.count(']')
+}
+
+private static List<String> pathOf(String header, int width, int index) {
+    int end = header.length() - width
+    if (end <= width) {
+        throw new GradleException("manifest: line ${index + 1} has an empty table name")
+    }
+    return header.substring(width, end).split('\\.').collect { it.trim() }
+}
+
+private static Map openTable(Map root, List<String> parts, boolean isArray, int line) {
+    Map parent = root
+    for (String part : parts.subList(0, parts.size() - 1)) {
+        Object existing = parent[part]
+        if (existing == null) {
+            existing = [:]
+            parent[part] = existing
+        }
+        if (!(existing instanceof Map)) {
+            throw new GradleException("manifest: line ${line + 1} walks through ${part}, which is not a table")
+        }
+        parent = (Map) existing
+    }
+    String last = parts.last()
+    if (isArray) {
+        Object existing = parent[last]
+        if (existing == null) {
+            existing = []
+            parent[last] = existing
+        }
+        Map element = [:]
+        ((List) existing) << element
+        return element
+    }
+    Object existing = parent[last]
+    if (existing == null) {
+        existing = [:]
+        parent[last] = existing
+    }
+    if (!(existing instanceof Map)) {
+        throw new GradleException("manifest: ${parts.join('.')} is redefined as a table on line ${line + 1}")
+    }
+    return (Map) existing
+}
+
+private static List<String> stringArray(String value, String key) {
+    List<String> items = []
+    value.substring(1, value.length() - 1).split(',').each { String item ->
+        String text = item.trim()
+        if (text.isEmpty()) {
+            return
+        }
+        if (!text.startsWith('"') || !text.endsWith('"')) {
+            throw new GradleException("manifest: ${key} has an element that is not a quoted string: ${text}")
+        }
+        items << text.substring(1, text.length() - 1)
+    }
+    return items
+}
+
+// ---------------------------------------------------------------------------------------- what it does
+
+/**
+ * Write a finished tree as the archive a release publishes, named for its target.
+ *
+ * Both targets end here, and share nothing but this: the tree above them is each target's own (ADR 0015), and
+ * the name is what a client will ask for by `<os>-<arch>`.
+ */
+private File writeArchive(Map manifest, String target, File runtime) {
+    File dist = new File(this.file('build'), 'dist')
+    dist.mkdirs()
+    File archive = new File(dist, "herepy-runtime-${manifest.base.version}-${target}.tar.gz")
+    int entries = archiveRuntime(runtime, archive)
+    this.logger.lifecycle("archive  : ${archive} (${archive.length()} bytes, ${entries} entries)")
+    return archive
+}
+
+/** Write the sha256 a client checks the download against, beside the archive rather than into it. */
+private File writeDigest(File archive) {
+    String digest = sha256(archive)
+    new File(archive.path + '.sha256').text = "${digest}  ${archive.name}\n"
+    this.logger.lifecycle("sha256   : ${digest}")
+    return archive
+}
+
+static String platformKey() {
+    String os = System.getProperty('os.name').toLowerCase(Locale.ROOT)
+    String arch = System.getProperty('os.arch').toLowerCase(Locale.ROOT)
+    String name = os.contains('win') ? 'windows' : (os.contains('mac') ? 'macos' : 'linux')
+    String cpu = (arch == 'aarch64' || arch == 'arm64') ? 'aarch64' : 'x86_64'
+    return "${name}-${cpu}".toString()
+}
+
+static String fileNameOf(String url) {
+    return url.substring(url.lastIndexOf('/') + 1)
+}
+
+static String sha256(File file) {
+    MessageDigest digest = MessageDigest.getInstance('SHA-256')
+    file.withInputStream { stream ->
+        byte[] buffer = new byte[1 << 16]
+        int read
+        while ((read = stream.read(buffer)) > 0) {
+            digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().collect { String.format('%02x', it) }.join()
+}
+
+/** The file in `cache` whose sha256 is `expected`, downloaded from `url` if it is not there yet. */
+static File fetch(File cache, String url, String name, String expected) {
+    cache.mkdirs()
+    File target = new File(cache, name)
+    if (target.isFile() && sha256(target) == expected) {
+        return target
+    }
+    File partial = new File(cache, name + '.part')
+    partial.delete()
+    new URL(url).withInputStream { input -> partial.withOutputStream { output -> output << input } }
+    String actual = sha256(partial)
+    if (actual != expected) {
+        partial.delete()
+        throw new GradleException("${name}: sha256 is ${actual}, the manifest says ${expected}")
+    }
+    target.delete()
+    if (!partial.renameTo(target)) {
+        Files.move(partial.toPath(), target.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
+    return target
+}
+
+static void extractTarGz(File archive, File destination) {
+    Path root = destination.toPath().toAbsolutePath().normalize()
+    Files.createDirectories(root)
+    new TarArchiveInputStream(new GZIPInputStream(new FileInputStream(archive))).withCloseable { TarArchiveInputStream tar ->
+        TarArchiveEntry entry
+        while ((entry = tar.nextEntry) != null) {
+            Path target = within(root, entry.name)
+            if (entry.isDirectory()) {
+                Files.createDirectories(target)
+                continue
+            }
+            Files.createDirectories(target.parent)
+            if (entry.isSymbolicLink()) {
+                Files.createSymbolicLink(target, Path.of(entry.linkName))
+                continue
+            }
+            if (entry.isLink()) {
+                // A hard link is the same bytes, not a copy of them: the artifact leans on this for terminfo,
+                // and expanding it costs 5 MB and changes nothing a user can see.
+                Path source = within(root, entry.linkName)
+                try {
+                    Files.createLink(target, source)
+                } catch (IOException ignored) {
+                    Files.copy(source, target)
+                }
+                continue
+            }
+            OutputStream output = Files.newOutputStream(target)
+            try {
+                output << tar
+            } finally {
+                output.close()
+            }
+            applyMode(target, entry.mode)
+        }
+    }
+}
+
+/** The paths under `root` that `patterns` name: what a run of `applyRemovals` would delete. */
+private static List<Path> removalMatches(File root, List<String> patterns) {
+    Path base = root.toPath().toAbsolutePath().normalize()
+    List<PathMatcher> matchers = patterns.collect { String pattern ->
+        FileSystems.getDefault().getPathMatcher("glob:${pattern.replaceAll('/+$', '')}".toString())
+    }
+    List<Path> doomed = []
+    Files.walk(base).withCloseable { stream ->
+        stream.filter { Path path -> !path.equals(base) }.forEach { Path path ->
+            Path relative = base.relativize(path)
+            if (matchers.any { PathMatcher matcher -> matcher.matches(relative) }) {
+                doomed << path
+            }
+        }
+    }
+    return doomed
+}
+
+static int applyRemovals(File root, List<String> patterns) {
+    int removed = 0
+    // Parents first: a pattern usually names a directory, and removing it takes its contents with it —
+    // which is also why nothing here needs to match the files inside a matched directory.
+    removalMatches(root, patterns).sort { Path a, Path b -> a.nameCount <=> b.nameCount }.each { Path path ->
+        if (Files.exists(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            deleteTree(path.toFile())
+            removed++
+        }
+    }
+    return removed
+}
+
+static void unpackWheel(File wheel, File destination, List<String> without) {
+    Path root = destination.toPath().toAbsolutePath().normalize()
+    Files.createDirectories(root)
+    List<PathMatcher> skipped = without.collect { String pattern ->
+        FileSystems.getDefault().getPathMatcher("glob:${pattern}".toString())
+    }
+    new ZipInputStream(new FileInputStream(wheel)).withCloseable { ZipInputStream zip ->
+        def entry
+        while ((entry = zip.nextEntry) != null) {
+            Path target = within(root, entry.name)
+            Path relative = root.relativize(target)
+            boolean drop = false
+            for (int depth = 1; depth <= relative.nameCount && !drop; depth++) {
+                Path prefix = relative.subpath(0, depth)
+                drop = skipped.any { PathMatcher matcher -> matcher.matches(prefix) }
+            }
+            if (drop) {
+                continue
+            }
+            if (entry.isDirectory()) {
+                Files.createDirectories(target)
+                continue
+            }
+            Files.createDirectories(target.parent)
+            OutputStream output = Files.newOutputStream(target)
+            try {
+                output << zip
+            } finally {
+                output.close()
+            }
+        }
+    }
+}
+
+/** The mod's own package, checked before a tree is pointed at it: a runtime pointed at nothing is worse. */
+private static void requirePackage(File source) {
+    if (!new File(source, '__init__.py').isFile()) {
+        throw new GradleException("${source} has no __init__.py, so the runtime would point at nothing")
+    }
+}
+
+/**
+ * Copy `src/herecraft` into the standard library's directory, which is where both layouts hold it:
+ * `lib/python3.13/herecraft` here, `Lib/herecraft` there.
+ *
+ * Java imports it rather than naming a file inside it (ADR 0018), so where the package sits is a rule the two
+ * trees share, not something each layout decides for itself.
+ */
+private static void copyPackage(File target, File source) {
+    requirePackage(source)
+    copyTree(source.toPath(), target.toPath().toAbsolutePath().normalize())
+}
+
+static void installHerecraft(File runtime, String abi, boolean packaged, File source) {
+    requirePackage(source)
+    Path link = runtime.toPath().toAbsolutePath().normalize().resolve("lib/python${abi}/herecraft")
+    File existing = link.toFile()
+    if (existing.isDirectory() && !Files.isSymbolicLink(link)) {
+        deleteTree(existing)
+    } else {
+        Files.deleteIfExists(link)
+    }
+    if (packaged) {
+        copyPackage(existing, source)
+    } else {
+        // The dev tree reads the sources that are being edited: a symlink is the point of it.
+        Files.createDirectories(link.parent)
+        Files.createSymbolicLink(link, source.toPath().toAbsolutePath())
+    }
+}
+
+static void copyTree(Path source, Path destination) {
+    Files.walk(source).withCloseable { stream ->
+        stream.forEach { Path path ->
+            Path target = destination.resolve(source.relativize(path).toString())
+            if (Files.isDirectory(path)) {
+                Files.createDirectories(target)
+            } else {
+                Files.createDirectories(target.parent)
+                Files.copy(path, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
+        }
+    }
+}
+
+private static Path within(Path root, String name) {
+    Path target = root.resolve(name).normalize()
+    if (!target.startsWith(root)) {
+        throw new GradleException("runtime archive: ${name} is outside ${root}")
+    }
+    return target
+}
+
+/** Which family's removal list a target uses: the layout, not the operating system. */
+static String packageFamily(String target) {
+    return target.startsWith('windows') ? 'windows' : 'posix'
+}
+
+/** The single directory an archive unpacks to, which is what a PBS tarball is. */
+private static File singleDirectory(File directory) {
+    List<File> children = (directory.listFiles() ?: []) as List<File>
+    if (children.size() != 1 || !children.first().isDirectory()) {
+        throw new GradleException("runtime archive: expected one top-level directory, found " +
+                "${children.collect { it.name }}")
+    }
+    return children.first()
+}
+
+/**
+ * Byte-compile the tree's standard library and site-packages, with the artifact's own interpreter.
+ *
+ * Which layout the tree is decides what to run, and which host this is does not: a Windows tree is built here
+ * and its interpreter runs under Wine. `launcher` is what starts that interpreter — nothing for this host's own
+ * tree, `wine` for a Windows one — and the paths handed over are relative to the tree, so neither interpreter
+ * has to be told what a host path means.
+ */
+private static int precompile(File tree, String abi, List<String> launcher) {
+    boolean windows = new File(tree, 'python.exe').isFile()
+    File python = windows ? new File(tree, 'python.exe') : new File(tree, "bin/python${abi}".toString())
+    if (!python.isFile()) {
+        throw new GradleException("compileall needs the artifact's own interpreter, and ${python} is absent")
+    }
+    String root = windows ? 'Lib' : "lib/python${abi}".toString()
+    runTool((launcher ?: []) + [python.absolutePath, '-m', 'compileall', '-q', '-j', '0', root], tree)
+    long compiled = 0
+    Files.walk(new File(tree, root).toPath()).withCloseable { stream ->
+        compiled = stream.filter { Path path -> path.toString().endsWith('.pyc') }.count()
+    }
+    if (compiled == 0) {
+        throw new GradleException("compileall left nothing to import in ${new File(tree, root)}")
+    }
+    return (int) compiled
+}
+
+/**
+ * Write the runtime as a tar.gz a release could publish.
+ *
+ * A dev tree carries `scripts/`, `typings/` and the class dumps beside the install tree, so the archive names
+ * what it leaves out rather than what it takes: a file added to the runtime later should not silently vanish
+ * from what ships.
+ */
+private static int archiveRuntime(File runtime, File archive) {
+    List<String> notShipped = ['scripts', 'typings', 'java-classes.txt', 'neoforge-classes.txt']
+    archive.parentFile.mkdirs()
+    int[] entries = [0]
+    Path root = runtime.toPath().toAbsolutePath().normalize()
+    new TarArchiveOutputStream(new GzipCompressorOutputStream(new FileOutputStream(archive))).withCloseable { TarArchiveOutputStream tar ->
+        tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX)
+        tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_POSIX)
+        List<Path> payload = Files.list(root).withCloseable { stream ->
+            stream.filter { Path path -> !notShipped.contains(root.relativize(path).toString()) }
+                    .sorted()
+                    .toList()
+        }
+        payload.each { Path top ->
+            Files.walk(top).withCloseable { stream ->
+                stream.forEach { Path path ->
+                    String name = root.relativize(path).toString().replace(File.separatorChar, '/' as char)
+                    if (Files.isSymbolicLink(path)) {
+                        TarArchiveEntry link = new TarArchiveEntry(name, TarConstants.LF_SYMLINK)
+                        link.setLinkName(Files.readSymbolicLink(path).toString())
+                        link.setMode(modeOf(path))
+                        tar.putArchiveEntry(link)
+                        tar.closeArchiveEntry()
+                    } else if (Files.isDirectory(path)) {
+                        TarArchiveEntry dir = new TarArchiveEntry(name + '/')
+                        dir.setMode(modeOf(path))
+                        tar.putArchiveEntry(dir)
+                        tar.closeArchiveEntry()
+                    } else {
+                        TarArchiveEntry file = new TarArchiveEntry(path.toFile(), name)
+                        file.setMode(modeOf(path))
+                        tar.putArchiveEntry(file)
+                        Files.copy(path, tar)
+                        tar.closeArchiveEntry()
+                    }
+                    entries[0]++
+                }
+            }
+        }
+        tar.finish()
+    }
+    return entries[0]
+}
+
+/** A file's mode as a tar entry wants it; not every filesystem has one. */private static int modeOf(Path path) {
+    try {
+        Set<PosixFilePermission> permissions =
+                Files.getPosixFilePermissions(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        int mode = 0
+        if (permissions.contains(PosixFilePermission.OWNER_READ)) mode |= 0400
+        if (permissions.contains(PosixFilePermission.OWNER_WRITE)) mode |= 0200
+        if (permissions.contains(PosixFilePermission.OWNER_EXECUTE)) mode |= 0100
+        if (permissions.contains(PosixFilePermission.GROUP_READ)) mode |= 0040
+        if (permissions.contains(PosixFilePermission.GROUP_WRITE)) mode |= 0020
+        if (permissions.contains(PosixFilePermission.GROUP_EXECUTE)) mode |= 0010
+        if (permissions.contains(PosixFilePermission.OTHERS_READ)) mode |= 0004
+        if (permissions.contains(PosixFilePermission.OTHERS_WRITE)) mode |= 0002
+        if (permissions.contains(PosixFilePermission.OTHERS_EXECUTE)) mode |= 0001
+        return mode
+    } catch (UnsupportedOperationException ignored) {
+        return Files.isDirectory(path, java.nio.file.LinkOption.NOFOLLOW_LINKS) ? 0755 : 0644
+    }
+}
+
+/** An extracted file keeps the mode the archive gave it: `bin/python3.13` has to stay executable. */
+private static void applyMode(Path target, int mode) {
+    if (!target.fileSystem.supportedFileAttributeViews().contains('posix')) {
+        return
+    }
+    List<PosixFilePermission> permissions = []
+    if ((mode & 0400) != 0) permissions << PosixFilePermission.OWNER_READ
+    if ((mode & 0200) != 0) permissions << PosixFilePermission.OWNER_WRITE
+    if ((mode & 0100) != 0) permissions << PosixFilePermission.OWNER_EXECUTE
+    if ((mode & 0040) != 0) permissions << PosixFilePermission.GROUP_READ
+    if ((mode & 0020) != 0) permissions << PosixFilePermission.GROUP_WRITE
+    if ((mode & 0010) != 0) permissions << PosixFilePermission.GROUP_EXECUTE
+    if ((mode & 0004) != 0) permissions << PosixFilePermission.OTHERS_READ
+    if ((mode & 0002) != 0) permissions << PosixFilePermission.OTHERS_WRITE
+    if ((mode & 0001) != 0) permissions << PosixFilePermission.OTHERS_EXECUTE
+    Files.setPosixFilePermissions(target, permissions as Set<PosixFilePermission>)
+}
+
+/**
+ * Remove a tree without following symbolic links in it.
+ *
+ * `File.deleteDir()` — and every groovy `deleteDir()` — canonicalizes first, so deleting a directory that
+ * contains a symlink deletes what the link points at. The dev runtime links `herecraft` into `src/`, which
+ * means that version of this function removed the sources; this one deletes the link and leaves its target
+ * alone, whatever it points at.
+ */
+private static void deleteTree(File root) {
+    Path base = root.toPath()
+    if (!Files.exists(base, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+        return
+    }
+    if (Files.isSymbolicLink(base)) {
+        Files.delete(base)
+        return
+    }
+    Files.walkFileTree(base, new java.nio.file.SimpleFileVisitor<Path>() {
+        @Override
+        java.nio.file.FileVisitResult visitFile(Path file, java.nio.file.attribute.BasicFileAttributes attributes) {
+            Files.deleteIfExists(file)
+            return java.nio.file.FileVisitResult.CONTINUE
+        }
+
+        @Override
+        java.nio.file.FileVisitResult postVisitDirectory(Path directory, IOException failure) {
+            Files.deleteIfExists(directory)
+            return java.nio.file.FileVisitResult.CONTINUE
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------------------- wine smoke tools
+
+/** Run a tool in `directory`, keep its output, and fail with that output when it fails. */
+private static String runTool(List<String> command, File directory) {
+    // GString is not String, and ProcessBuilder copies into a String[]: spell every argument out.
+    List<String> arguments = command.collect { it.toString() }
+    ProcessBuilder builder = new ProcessBuilder(arguments)
+    builder.directory(directory)
+    builder.redirectErrorStream(true)
+    builder.environment().put('WINEDEBUG', '-all')
+    Process process = builder.start()
+    String output = process.inputStream.getText('UTF-8')
+    int code = process.waitFor()
+    if (code != 0) {
+        throw new GradleException("${new File(arguments.first()).name} exited ${code}:\n${output.take(6000)}")
+    }
+    return output
+}
+
+/** A JDK tool from the JVM running Gradle, which is a JDK. */
+private static String javaTool(String name) {
+    File tool = new File(new File(System.getProperty('java.home'), 'bin'),
+            name + (System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('win') ? '.exe' : ''))
+    if (!tool.isFile()) {
+        throw new GradleException("no ${name} beside ${System.getProperty('java.home')}")
+    }
+    return tool.absolutePath
+}
+
+/** MSVC through msvc-wine: `/opt/msvc/bin/<arch>/cl` unless `MSVC_BIN` says where. */
+private static String msvcTool(String name) {
+    boolean arm = ['aarch64', 'arm64'].any { System.getProperty('os.arch').toLowerCase(Locale.ROOT).contains(it) }
+    String base = System.getenv('MSVC_BIN') ?: "/opt/msvc/bin/${arm ? 'arm64' : 'x64'}"
+    File tool = new File(base, name)
+    if (!tool.isFile()) {
+        throw new GradleException("no ${name} in ${base}; msvc-wine installs it there, or set MSVC_BIN")
+    }
+    return tool.absolutePath
+}
+
+private static String wineTool() {
+    return System.getenv('WINE') ?: 'wine'
+}
+
+/** The Windows spelling of a path, which is what a program under Wine needs. */
+private static String winePath(String path) {
+    String output = runTool([System.getenv('WINEPATH') ?: 'winepath', '-w', path],
+            new File(System.getProperty('java.io.tmpdir')))
+    // `winepath` starts Wine, and Wine's graphics driver writes to this process's stdout before the answer does:
+    // the answer is the last line that looks like a Windows path, and the rest is noise rather than output.
+    List<String> answers = output.readLines().findAll { String line -> line ==~ /^[A-Za-z]:[\\\/].+/ }
+    if (answers.isEmpty()) {
+        throw new GradleException("winepath did not answer with a Windows path:\n${output.take(2000)}")
+    }
+    return answers.last().trim()
+}

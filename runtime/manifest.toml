@@ -1,0 +1,165 @@
+# The Python runtime HerePy embeds (ADR 0014).
+#
+# This file is the whole account of what is in the runtime: the upstream artifact it comes from, what the
+# shipped package removes from it, and what is added to it. Nothing in `runs/client/python` is installed by
+# hand, and a file that is neither in the base nor here is a file nobody meant to keep.
+
+[runtime]
+# The ABI the mod links against: jep's extension module is `cpython-313-*` and libjep.so names
+# `libpython3.13.so.1.0`, so a new patch release inside 3.13 is a drop-in and a new minor is not.
+abi = "3.13"
+# The dev tree, and where a PBS install tree is cut: a prefix with `lib/`, `share/`, `include/`.
+home = "runs/client/python"
+
+[base]
+# python-build-standalone, pinned by tag: it publishes every one to two weeks, so anything that follows
+# "latest" is a runtime that changes without a diff. `install_only_stripped`, never `install_only` — the
+# latter is the same interpreter carrying a 250 MB libpython of debug information, 280 MB unpacked.
+project = "astral-sh/python-build-standalone"
+tag = "20261110"
+version = "3.13.18"
+variant = "install_only_stripped"
+# `tar.gz` because it is what the project publishes, so the download is the upstream asset rather than a
+# transcoding of it, and the JDK reads gzip already: no decompressor ever ships in the mod.
+format = "tar.gz"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/{tag}/{asset}"
+
+# One asset per target, keyed the way the packaging task asks for it: `<os>-<arch>`.
+[base.assets.linux-x86_64]
+asset = "cpython-3.13.18+20261110-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "f2d2199eb25880e07863b391cf7124e7ffa1338b0d65600dfcec117c4223a7fb"
+
+[base.assets.linux-aarch64]
+asset = "cpython-3.13.18+20261110-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz"
+sha256 = "55c00325f7c1fddf325dfc621aabdfbbac4dc54adda224af88ec411dc12db239"
+
+[base.assets.windows-x86_64]
+asset = "cpython-3.13.18+20261110-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "2e0fed09d48989f64c9305da9ff2d37a41c0d13ab2aa6283405b2b620dfbf805"
+
+[base.assets.windows-aarch64]
+asset = "cpython-3.13.18+20261110-aarch64-pc-windows-msvc-install_only_stripped.tar.gz"
+sha256 = "0a8840071810ddb8565256cd406b466d4e9dc6dc523395a5477880dbc4f67eb3"
+
+[base.assets.macos-x86_64]
+asset = "cpython-3.13.18+20261110-x86_64-apple-darwin-install_only_stripped.tar.gz"
+sha256 = "d27d59a722db9f69926eb6d9564071247221f45a04da920ea7f3001c97e32f9b"
+
+[base.assets.macos-aarch64]
+asset = "cpython-3.13.18+20261110-aarch64-apple-darwin-install_only_stripped.tar.gz"
+sha256 = "7a2384641584ab9984221fcb0fc9265df465922af71be71410529e2a9c3f0540"
+
+# What the shipped runtime removes, and the dev runtime keeps — the dev one is what a REPL, a debugger and
+# an `import` you did not plan for need, and it costs disk on one machine instead of everyone's download.
+#
+# The list is measured rather than guessed: with exactly these paths gone the game boots, the units load and
+# the stub generator runs, with no `No module named` anywhere (ADR 0014). It is written against the POSIX
+# layout that was measured; the Windows tree lays itself out differently (`python.exe`, `DLLs/`, `Lib/`), so it
+# has a list of its own below and both were measured the same way (ADR 0015).
+#
+# A pattern that matches nothing is not an error: 3.13.3 shipped Tcl/Tk 8.6 and 3.13.18 ships 9.0, so both
+# spellings are named and only one of them ever exists.
+[package.posix]
+remove = [
+  "bin/",
+  "include/",
+  "lib/pkgconfig",
+  "lib/python3.13/config-*",
+  "lib/tcl8",
+  "lib/tcl8.6",
+  "lib/tk8.6",
+  "lib/tcl9*",
+  "lib/tk9*",
+  "lib/Tix*",
+  "lib/itcl*",
+  "lib/thread*",
+  "lib/libtcl*",
+  "lib/libtk*",
+  "share/",
+  "lib/python3.13/ensurepip",
+  "lib/python3.13/idlelib",
+  "lib/python3.13/tkinter",
+  "lib/python3.13/turtledemo",
+  "lib/python3.13/turtle.py",
+  "lib/python3.13/_pyrepl",
+  "lib/python3.13/pydoc.py",
+  "lib/python3.13/pydoc_data",
+  "lib/python3.13/doctest.py",
+  "lib/python3.13/site-packages/pip",
+  "lib/python3.13/site-packages/pip-*.dist-info",
+]
+
+# The Windows equivalent, measured on the Windows tree with the Wine smoke as the boot (ADR 0016): what is
+# removed here is what a `.pyd`-based interpreter does not need to start, import numpy and run jep.
+[package.windows]
+remove = [
+  # Tcl/Tk lives in its own directory here, and its two DLLs sit with the extensions
+  "tcl/",
+  "DLLs/tcl86t.dll",
+  "DLLs/tk86t.dll",
+  "DLLs/_tkinter.pyd",
+  # this artifact still carries the test extensions the POSIX one dropped
+  "DLLs/_test*.pyd",
+  "Lib/tkinter",
+  "Lib/idlelib",
+  "Lib/turtledemo",
+  "Lib/turtle.py",
+  "Lib/venv",
+  "Lib/pydoc.py",
+  "Lib/pydoc_data",
+  "Lib/doctest.py",
+  "Lib/ensurepip",
+  "Lib/site-packages/pip",
+  "Lib/site-packages/pip-*.dist-info",
+  # only a C extension's build needs these, and jep is built before the removals run
+  "include/",
+  "libs/",
+]
+
+# A pack is an addition laid out like the runtime and unpacked into it, so one rule covers the base and
+# everything added to it, and a pack is something a user can choose not to have. numpy is the first: 57 MB
+# for arithmetic no line of herecraft uses, which is worth offering and not worth forcing. Its wheels are
+# ordinary PyPI wheels, already sha256-pinned and already zip archives, so a pack needs no format of ours
+# until one of them has to be published.
+[pack.numpy]
+version = "2.5.5"
+# Where a wheel's contents land. A wheel unpacks to the site-packages root, and this is that root here.
+lands_in = "lib/python3.13/site-packages"
+# 8 MB of the package's own test suite, which nothing imports.
+without = ["**/tests"]
+requires_python = ">=3.12"
+
+[pack.numpy.wheels.linux-x86_64]
+url = "https://files.pythonhosted.org/packages/40/d6/68dd5a83914bbcaf32b3165993f7955979916708cb0156d1e28231e18803/numpy-2.5.5-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+sha256 = "824025655df929268bfe6b47ed91a00d14209a6f760847cf150be446829e1ce4"
+
+[pack.numpy.wheels.linux-aarch64]
+url = "https://files.pythonhosted.org/packages/57/06/de83b859944409bb9058bc6110581a3d7fc1f54d6df1222744911d7f6b19/numpy-2.5.5-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"
+sha256 = "ae2b8285d0b4eed24739c3ca9ec0fa424a0247489c01e1d5fe2815a599e11d33"
+
+[pack.numpy.wheels.windows-x86_64]
+url = "https://files.pythonhosted.org/packages/45/74/bb9161943fb65caf24e4bb04c788f5c7815e6cb78ac595e7f46781033c82/numpy-2.5.5-cp313-cp313-win_amd64.whl"
+sha256 = "e0608d1585557b68dcb6a70a41654f7536567960afad79d91752d2863b242b68"
+
+[pack.numpy.wheels.windows-aarch64]
+url = "https://files.pythonhosted.org/packages/ac/b0/792631d03588912e948c1249c03a78ca9af0c548670f8fd63ea014cbc14a/numpy-2.5.5-cp313-cp313-win_arm64.whl"
+sha256 = "e0b87886bb45621d9279dad4ab9f2d154b5db0b019d378c107b8f71527b06a4a"
+
+[pack.numpy.wheels.macos-x86_64]
+url = "https://files.pythonhosted.org/packages/0f/fa/4ae71d860267f2f9eaf7640516f693acf61c9575d48157cdea459c0215aa/numpy-2.5.5-cp313-cp313-macosx_10_13_x86_64.whl"
+sha256 = "228e3d90e967495d61ddc79dd64e95267aae3bcf1b1c516a6186429106a0b444"
+
+[pack.numpy.wheels.macos-aarch64]
+url = "https://files.pythonhosted.org/packages/d4/9a/01a332ebb0899ddb14d782f86ed66d080463e5387a8778029462d1902019/numpy-2.5.5-cp313-cp313-macosx_11_0_arm64.whl"
+sha256 = "7e71ac4284c700afa654e2d15b1b174166710dca932f24045e5dc92001b5bda0"
+
+# jep is what puts CPython inside the JVM, and it is the one thing here that cannot be pinned as a binary:
+# PyPI publishes it as an sdist only, so it has to be compiled against this very runtime — which is why
+# ADR 0011 records a toolchain, not a wheel. Until its build is a step this task performs, a `jep` already
+# in the runtime is carried across a re-materialization and a missing one is reported, because a runtime
+# without it cannot start Python at all.
+[build.jep]
+version = "4.4.0"
+sdist = "https://files.pythonhosted.org/packages/f7/4f/e73ab939b0a7aa54c1c56e5425a51a8e6dd03e77e768341b62e5d6a67992/jep-4.4.0.tar.gz"
+sha256 = "152e66e940ba4d17eebf04cdb973de25b1c5843612e51ebcbd4264065b806c8a"
+
