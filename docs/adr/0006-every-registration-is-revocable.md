@@ -112,10 +112,6 @@ a `PythonRunner` task ended the thread that runs every later task, and losing th
 whole Python side with nothing in the log to say why. The queue now reports a failing task and keeps
 running, and dispatch wraps its own call for the same reason.
 
-What is still missing for the consequences above to be visible in a game: `revoke_all` has no caller
-outside a unit's own load, because `/herepy reload` does not exist yet, and a unit's identity is still
-the name it loads under rather than a manifest key (ADR 0003).
-
 ## Alternatives considered
 
 - **Restart the interpreter on reload.** JEP's `SharedInterpreter` attaches a thread to shared state;

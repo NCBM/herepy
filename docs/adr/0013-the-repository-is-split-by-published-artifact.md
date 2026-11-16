@@ -4,10 +4,9 @@
 
 ## Context
 
-The tree holds one Gradle project, one Python package at `src/herecraft/` (`src/` is the Java
-convention, and the Python package sits beside `src/main/java`), a 3 MB CPython distribution and a
-~450-file generated typing tree inside `runs/client/`, and no version control. `src/herecraft/` reaches the run directory through a symlink at
-`runs/client/python/lib/python3.13/herecraft/` — one copy of the code, no drift, and an arrangement
+The tree holds one Gradle project, with the Python package at `src/herecraft/` beside `src/main/java`, and a CPython
+distribution with its generated typing tree under `runs/client/`. `src/herecraft/` reaches the run directory through a
+symlink at `runs/client/python/lib/python3.13/herecraft/` — one copy of the code, no drift, and an arrangement
 nothing in the build creates or checks (a symlink does not survive packaging either).
 
 The Java half and the Python half are one protocol apart (ADR 0002) and are released together, which

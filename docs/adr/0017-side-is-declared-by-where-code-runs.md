@@ -4,13 +4,12 @@
 
 ## Context
 
-The template separates one class by side: `HerePyClient` carries `@Mod(value = HerePy.MODID, dist = Dist.CLIENT)`
-and `@EventBusSubscriber(value = Dist.CLIENT)`, so a dedicated server never loads it. Everywhere else the
-repository is side-blind:
+One class separates by side: a `@Mod` class carries `dist = Dist.CLIENT` and an `@EventBusSubscriber` carries
+`value = Dist.CLIENT`, so a dedicated server never loads it. Everywhere else the repository is side-blind:
 
 - `EventBridge.eventType` calls `Class.forName` with no side check, and reports a miss with "No such event class".
-- The fifteen wrappers in `herecraft/api/events/` carry no side, and work today because nobody has subscribed to
-  one on a server that lacks the class.
+- The wrappers in `herecraft/api/events/` carry no side, and work because nothing has subscribed to one on a server
+  that lacks the class.
 - `herecraft/api/` names no client-only type, which keeps the Python surface server-safe.
 - Python has no way to ask which distribution it is running in.
 

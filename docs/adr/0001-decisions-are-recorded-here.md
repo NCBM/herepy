@@ -6,10 +6,8 @@
 
 The shape of this project was worked out in discussion: what the Java/Python boundary is, how a unit
 of Python code is identified and loaded, who revokes a registration, whether the host thread runs an
-event loop. None of it was written down. The repository's `README.md` is still the NeoGradle template
-it was generated from, and there is no version control history to consult (the tree has
-`.gitignore`/`.gitattributes` but no `.git`), so a decision that stops being true leaves nothing behind
-that says why it was made — only code that looks arbitrary.
+event loop. None of it was written down, so a decision that stops being true leaves nothing behind that
+says why it was made — only code that looks arbitrary.
 
 The neighbouring project `composat` records its decisions this way, and the format is borrowed from it
 deliberately: one file per decision, a title that is a claim, and a section for the options that were
@@ -30,8 +28,12 @@ numbered in the order it was made, with:
   options lost is not.
 
 A recorded decision that has entered a commit is fixed: a change arrives as a new record that supersedes it, and both
-stay. A record that has never been committed holds no such weight — the tree has no version control yet — so it may be
-rewritten, or folded into a later record that subsumes it, while nothing depends on its exact words.
+stay. A record that has never been committed holds no such weight, so it may be rewritten, or folded into a later
+record that subsumes it, while nothing depends on its exact words.
+
+**A record carries the claim and the reasons for it.** What the tree holds while a record is written — which files
+exist, what is finished, what is scheduled — belongs to the code and to the commit that changes it. A record that
+carries it goes stale without anyone editing the record, and a stale record is read as a wrong claim.
 
 Where a decision could be settled by running something, the record says what was measured. The cases that can be
 re-run live in [`tools/checks/check.py`](../../tools/checks/check.py); the rest answered a question once, and the
@@ -41,7 +43,7 @@ answer is stated in the record it bears on.
 
 - Reading `docs/adr/README.md` in order is reading the design.
 - A decision that gets argued twice is a missing record.
-- The records are files, so they survive the repository having no version control at present.
+- The records are files in the tree, so they travel with the code and are read where the code is.
 - Nothing enforces them. A record that contradicts the code is a disagreement to resolve, not a build
   error.
 

@@ -147,13 +147,10 @@ The thread Python reports is `Dummy-1`: jep makes the Python thread state withou
 `threading.Thread`, so every log line from Python names a thread nobody can find. Worth knowing before
 reading one of these logs and concluding the loop is somewhere else.
 
-What is still open, in the order it will start to matter:
+Where the loop shows through:
 
-- **`close()` has no caller.** Nothing reloads or shuts units down yet, so nothing asks the loop to
-  stop; the thread is a daemon, which is what keeps that from hanging the JVM. `/herepy reload` is the
-  caller it is waiting for.
-- **A handler that blocks without awaiting holds the loop**, and the record's "worth a watchdog later"
-  is now the way to find one: the deadline logs the symptom, not the culprit.
+- **A handler that blocks without awaiting holds the loop**, and the deadline logs the symptom, which is the way to
+  find one.
 - **A slow unit delays `enable()` for every unit.** Loading runs inside the loop now, and a unit that
   spends 24 s writing stubs — the stub generator does — pushes every listener up after the world has
   already started, so no handler sees the server-start events. That is ADR 0004's staging measured

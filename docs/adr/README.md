@@ -29,9 +29,9 @@ file keeps the reason it stopped being true. Status vocabulary is in
 | [0018](0018-each-loading-phase-has-one-owner.md) | Each loading phase has one owner, and a script pack is one unit | proposed |
 | [0019](0019-the-jar-carries-only-the-core.md) | The jar carries only the core, and the script track is always a second file | proposed |
 
-Records 0005 and 0007 were folded into [0018](0018-each-loading-phase-has-one-owner.md) while the tree had no
-version control, so their numbers stay unused and every surviving reference still names the same decision. A record
-that has entered a commit keeps its number and its words.
+Records 0005 and 0007 were folded into [0018](0018-each-loading-phase-has-one-owner.md), so their numbers stay
+unused and every surviving reference still names the same decision. A record that has entered a commit keeps its
+number and its words.
 
 ## How these were checked
 

@@ -4,11 +4,10 @@
 
 ## Context
 
-**Not carried out, and not scheduled.** The repository has no version control, so there is no release to publish,
-no tag to attach a file to and no second channel to choose between. What follows is the shape the releases take
-once there is a place to put them; until then the script track is a unit in `src/units` and nothing more.
+A release needs a place to publish to, a tag to attach a file to, and a channel whose file-type list allows a second
+file of an unfamiliar extension. The shape below is what the files take once those exist.
 
-The script track is its own HPy Mod, released as a `.pyz` that discovery finds in `mods/` (0018). Delivery differs
+The script track is its own HerePy mod, released as a `.pyz` that discovery finds in `mods/` (0018). Delivery differs
 by channel: a GitHub release carries whatever is attached to it, and a mod platform accepts what its file-type list
 allows, which for a second file of an unfamiliar extension is nothing to plan around.
 
