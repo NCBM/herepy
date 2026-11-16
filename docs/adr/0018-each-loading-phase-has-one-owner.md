@@ -1,6 +1,6 @@
 # 18. Each loading phase has one owner, and a script pack is one unit
 
-**Status**: proposed, 2026-11-16.
+**Status**: accepted, 2026-11-17.
 
 ## Context
 

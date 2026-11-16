@@ -1,6 +1,6 @@
 # 19. The jar carries only the core, and the script track is always a second file
 
-**Status**: proposed, 2026-11-16.
+**Status**: accepted, 2026-11-17.
 
 ## Context
 

@@ -1,6 +1,6 @@
 # 17. Side is declared by where code runs, and a unit keeps its identity across incarnations
 
-**Status**: proposed, 2026-11-16.
+**Status**: accepted, 2026-11-17.
 
 ## Context
 
