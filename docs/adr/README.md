@@ -28,6 +28,7 @@ file keeps the reason it stopped being true. Status vocabulary is in
 | [0017](0017-side-is-declared-by-where-code-runs.md) | Side is declared by where code runs, and a unit keeps its identity across incarnations | proposed |
 | [0018](0018-each-loading-phase-has-one-owner.md) | Each loading phase has one owner, and a script pack is one unit | proposed |
 | [0019](0019-the-jar-carries-only-the-core.md) | The jar carries only the core, and the script track is always a second file | proposed |
+| [0020](0020-the-runtime-is-published-per-target-and-fetched-on-demand.md) | The runtime is published per target and fetched on demand, and a runtime on disk is used first | proposed |
 
 Records 0005 and 0007 were folded into [0018](0018-each-loading-phase-has-one-owner.md), so their numbers stay
 unused and every surviving reference still names the same decision. A record that has entered a commit keeps its
