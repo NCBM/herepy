@@ -66,13 +66,14 @@ public final class CommandBridge {
             builders.add(Commands.literal(part));
         }
         builders.getFirst().requires(source -> source.hasPermission(permission));
-        for (int i = 0; i + 1 < builders.size(); i++) {
-            builders.get(i).then(builders.get(i + 1));
-        }
+        // `then` builds the child it is handed, so the deepest literal is given its command before it is attached.
         builders.getLast().executes(context -> {
             python.submit("commands.run", path, context.getSource());
             return 1;
         });
+        for (int i = 0; i + 1 < builders.size(); i++) {
+            builders.get(i).then(builders.get(i + 1));
+        }
         return builders.getFirst();
     }
 }
