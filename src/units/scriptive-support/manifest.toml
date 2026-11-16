@@ -1,0 +1,6 @@
+# The script track: one package under the game directory's python/scripts, imported as one unit (ADRs 0018,
+# 0019). It is a packaged unit like any other — dropped into mods/ as this directory or as a .pyz — so the
+# kernel knows nothing about where scripts live or how they reload.
+id = "herepy/scriptive-support"
+version = "0.1.0"
+api = "0.1"
