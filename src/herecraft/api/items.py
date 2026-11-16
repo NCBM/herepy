@@ -65,7 +65,8 @@ class ItemStack(JavaWrapper[Any]):
         return ItemStack(self._jobj.split(amount))
 
     def is_same_item(self, other: ItemStack) -> bool:
-        return bool(self._jobj.is_(other._jobj))
+        """Whether the two stacks hold the same item, which is the question `ItemStack.isSameItem` asks."""
+        return self.item == other.item
 
     @classmethod
     def empty(cls) -> ItemStack:
