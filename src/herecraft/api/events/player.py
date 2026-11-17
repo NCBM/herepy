@@ -31,9 +31,9 @@ class PlayerLoggedOutEvent(PlayerEvent):
 
 
 class PlayerRespawnEvent(PlayerEvent):
-    """Wraps net.neoforged.neoforge.event.entity.player.PlayerRespawnEvent."""
+    """Wraps net.neoforged.neoforge.event.entity.player.PlayerEvent$PlayerRespawnEvent."""
 
-    __java_class_name__: ClassVar[str] = "net.neoforged.neoforge.event.entity.player.PlayerRespawnEvent"
+    __java_class_name__: ClassVar[str] = "net.neoforged.neoforge.event.entity.player.PlayerEvent$PlayerRespawnEvent"
     __side__: ClassVar[Side] = Side.BOTH
 
     @property
