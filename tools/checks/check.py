@@ -516,6 +516,24 @@ def stub_rejects_unspellable_names() -> None:
     assert not list(root.rglob("*.pyi")), "a rejected name writes nothing"
 
 
+@check("a javadoc fragment becomes the text a docstring shows, markup included")
+def javadoc_markup() -> None:
+    from herecraft.stubgen.javadoc import to_text
+
+    assert to_text(["Represents an OpenAL audio channel."]) == "Represents an OpenAL audio channel."
+    assert to_text(["Uses {@code DEBUG_} flags and {@literal <T>}."]) == "Uses `DEBUG_` flags and `<T>`."
+    assert to_text(["{@link net.minecraft.core.Registry#CUSTOM_STAT a custom type} and {@link CustomStat}."]) == (
+        "a custom type and CustomStat."
+    )
+    assert to_text(["{@link #isKeyDown()} asks the same."]) == "isKeyDown() asks the same."
+    assert to_text(["<p>One.</p><p><strong>Two</strong> and <em>three</em>.</p>"]) == "One.\n\n**Two** and *three*."
+    assert to_text(["Reads:", "<ul><li>first</li><li>second</li></ul>"]) == "Reads:\n\n- first\n- second"
+    assert to_text(["<table><tr><th>a</th><td>b</td></tr></table>"]) == "a | b"
+    assert to_text(["5 &lt; 7 &amp; 9"]) == "5 < 7 & 9"
+    assert to_text(["Only tags:", "@param <T> a value", "@see Something"]) == "Only tags:"
+    assert to_text(["Spells <T> as a type parameter."]) == "Spells <T> as a type parameter."
+
+
 def main() -> int:
     failures = 0
     for what, case in CHECKS:
