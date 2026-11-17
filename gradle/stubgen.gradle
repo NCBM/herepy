@@ -111,3 +111,15 @@ tasks.register('writeParchment') {
                 "${classes.values().sum { it.methods.size() }} methods, ${docs} docstrings -> ${file.absolutePath}")
     }
 }
+
+// The name data is the dev runs' to hand over, and nobody else's: a mapping set covers the game, and nothing covers
+// a mod's own classes, so the generator names no file and a run without one writes `argN` and no docstrings
+// (ADR 0021). Exporting the projection here keeps `/stubgen write` in a dev client writing the names the build
+// resolved, and leaves the unit with no idea of where this repository keeps anything.
+def stubgenDataPath = layout.buildDirectory.file('stubgen/parchment.json').get().asFile.absolutePath
+def devRunNames = ['runClient', 'runServer', 'runData', 'runGameTestServer']
+tasks.matching { devRunNames.contains(it.name) }.configureEach { task ->
+    if (task instanceof org.gradle.api.tasks.JavaExec) {
+        task.environment 'HEREPY_STUBGEN_DATA', stubgenDataPath
+    }
+}

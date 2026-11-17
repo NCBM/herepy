@@ -1,0 +1,6 @@
+# The stub corpus generator as a unit (ADR 0021): nothing at boot, one command that writes the corpus on demand.
+# Reflecting the game's classpath takes minutes and floods the log, so a dev client that is only being played pays
+# nothing for this unit being installed.
+id = "herepy/stubgen"
+version = "0.1.0"
+api = "0.1"

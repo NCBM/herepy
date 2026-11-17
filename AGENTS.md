@@ -23,6 +23,7 @@ runs/client/python/bin/python3 tools/checks/check.py   # the Python half, no Min
 ./gradlew packagePythonRuntime                # after -Ppackage: build/dist/<name>.tar.gz + .sha256
 ./gradlew checkPythonRuntime                  # manifest against what is on disk
 ./gradlew writeParchment                      # the stub generator's names and docstrings: build/stubgen/parchment.json (ADR 0021)
+/stubgen write                                # in a dev client: the corpus and its report under the run's python/typings
 
 ./gradlew wineJepSmoke -PwinJdk=<dir>           # Windows target: build it with cl, smoke it under Wine (ADR 0016)
 ./gradlew wineJepSmoke -Ppackage -PwinJdk=<dir> # the shipped shape again, for the Windows layout

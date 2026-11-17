@@ -15,6 +15,7 @@ import asyncio
 from collections.abc import Callable
 import importlib
 import importlib.util
+import json
 import logging
 import pathlib
 import shutil
@@ -84,7 +85,7 @@ from herecraft import event as event_module
 from herecraft.kernel import loader
 from herecraft.kernel import unit as unit_module
 from herecraft.manifest import ManifestError, read_archive, read_directory
-from herecraft.stubgen import Overlay, StubGenerator, StubReport, closure, declared_seeds
+from herecraft.stubgen import Overlay, StubGenerator, StubReport, closure, declared_seeds, write
 
 WORK = pathlib.Path(tempfile.mkdtemp(prefix="herepy-check-"))
 env.install("CLIENT", str(WORK))
@@ -330,18 +331,21 @@ def reload_swap() -> None:
 
 
 @check("a command registered by a unit reaches the dispatcher, and goes when the unit does")
+class _Dispatcher:
+    """A stand-in for Java's command bridge: it keeps the paths it was told about and nothing else."""
+
+    def __init__(self) -> None:
+        self.declared: dict[str, int] = {}
+
+    def declare(self, path: str, permission: int) -> None:
+        self.declared[path] = permission
+
+    def withdraw(self, path: str) -> None:
+        _ = self.declared.pop(path, None)
+
+
 def commands() -> None:
     from herecraft import commands as commands_module
-
-    class _Dispatcher:
-        def __init__(self) -> None:
-            self.declared: dict[str, int] = {}
-
-        def declare(self, path: str, permission: int) -> None:
-            self.declared[path] = permission
-
-        def withdraw(self, path: str) -> None:
-            _ = self.declared.pop(path, None)
 
     dispatcher = _Dispatcher()
     commands_module.install_commands(dispatcher)
@@ -933,6 +937,43 @@ def stubs_ignore_reflection_order() -> None:
     _ = _generate(root, backward, tuple(backward))
     second = (root / "net/example/__init__.pyi").read_text(encoding="utf-8")
     assert first == second, "a class's bytes come from the class, not from the order reflection answered in"
+
+
+@check("a run writes the corpus and its report, and answers what it pruned")
+def run_writes_the_corpus() -> None:
+    root = WORK / "stubs-run"
+    stale = root / "net/other/__init__.pyi"
+    stale.parent.mkdir(parents=True)
+    _ = stale.write_text("class Gone: ...\n", encoding="utf-8")
+    classes = {
+        "net.example.Gadget": _jclass("Gadget"),
+        "net.example.Widget": _jclass("Widget", bases=("net.example.Gadget",)),
+    }
+    report, pruned = write(("net.example.Widget",), root, wrapper=_Wrapper(classes), classloader=_Loader())
+    assert pruned == 1, pruned
+    assert report.count("written") == 2, report.as_dict()
+    assert (root / "net/example/__init__.pyi").is_file()
+    assert not (root / "net/other").exists(), "a run prunes what it did not produce"
+    saved = json.loads((root / "stubgen-report.json").read_text(encoding="utf-8"))
+    assert saved["summary"] == {"written": 2, "rejected": 0, "failed": 0}, saved["summary"]
+    assert saved["applied"] == {"parameters": 0, "docstrings": 0}, saved["applied"]
+
+
+@check("the stubgen unit declares its command, and its manifest names the directory it sits in")
+def stubgen_unit() -> None:
+    from herecraft import commands as commands_module
+
+    root = pathlib.Path("src/units/stubgen")
+    manifest = read_directory(root)
+    assert manifest.id == "herepy/stubgen", manifest.id
+    dispatcher = _Dispatcher()
+    commands_module.install_commands(dispatcher)
+    with unit_module.active(manifest.id):
+        _ = _load_package(manifest.module_name, root)
+    try:
+        assert dispatcher.declared == {"stubgen write": 2}, dispatcher.declared
+    finally:
+        _purge(manifest.module_name)
 
 
 def main() -> int:
