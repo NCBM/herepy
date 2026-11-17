@@ -84,7 +84,7 @@ from herecraft import event as event_module
 from herecraft.kernel import loader
 from herecraft.kernel import unit as unit_module
 from herecraft.manifest import ManifestError, read_archive, read_directory
-from herecraft.stubgen import StubGenerator, StubReport
+from herecraft.stubgen import Overlay, StubGenerator, StubReport
 
 WORK = pathlib.Path(tempfile.mkdtemp(prefix="herepy-check-"))
 env.install("CLIENT", str(WORK))
@@ -403,14 +403,23 @@ def _jparam(index: int, canonical: str) -> _Reflected:
     )
 
 
-def _jmethod(name: str, params: tuple[str, ...] = (), returns: str = "void") -> _Reflected:
+def _jmethod(name: str, params: tuple[str, ...] = (), returns: str = "void", descriptor: str = "()V") -> _Reflected:
     return _Reflected(
         getName=lambda: name,
+        getDescriptor=lambda: descriptor,
         isAbstract=lambda: False,
         isStatic=lambda: False,
         isFinal=lambda: False,
         getReturnType=lambda: _jtype(returns),
         getParameters=lambda: [_jparam(index, canonical) for index, canonical in enumerate(params)],
+        getTypeParameters=lambda: [],
+    )
+
+
+def _jconstructor(descriptor: str = "()V") -> _Reflected:
+    return _Reflected(
+        getDescriptor=lambda: descriptor,
+        getParameters=lambda: [],
         getTypeParameters=lambda: [],
     )
 
@@ -431,8 +440,10 @@ def _jclass(
     bases: tuple[str, ...] = (),
     methods: tuple[_Reflected, ...] = (),
     fields: tuple[_Reflected, ...] = (),
+    constructors: tuple[_Reflected, ...] = (),
 ) -> _Reflected:
     return _Reflected(
+        getName=lambda: f"{package}.{simple}",
         getSimpleName=lambda: simple,
         getCanonicalName=lambda: f"{package}.{simple}",
         getPackageName=lambda: package,
@@ -442,13 +453,18 @@ def _jclass(
         getInnerClasses=lambda: [],
         getMethods=lambda: list(methods),
         getFields=lambda: list(fields),
-        getConstructors=lambda: [],
+        getConstructors=lambda: list(constructors),
     )
 
 
-def _generate(root: pathlib.Path, classes: dict[str, _Reflected], *batches: tuple[str, ...]) -> StubReport:
+def _generate(
+    root: pathlib.Path,
+    classes: dict[str, _Reflected],
+    *batches: tuple[str, ...],
+    overlay: Overlay | None = None,
+) -> StubReport:
     """Run the generator over the batches, on the fake classpath the caller built."""
-    generator = StubGenerator(root, wrapper=_Wrapper(classes), classloader=_Loader())
+    generator = StubGenerator(root, wrapper=_Wrapper(classes), classloader=_Loader(), overlay=overlay)
     report = StubReport()
     for names in batches:
         report.update(generator.generate_batch(names).outcomes)
@@ -532,6 +548,72 @@ def javadoc_markup() -> None:
     assert to_text(["5 &lt; 7 &amp; 9"]) == "5 < 7 & 9"
     assert to_text(["Only tags:", "@param <T> a value", "@see Something"]) == "Only tags:"
     assert to_text(["Spells <T> as a type parameter."]) == "Spells <T> as a type parameter."
+
+
+@check("a stub carries the docstring the data holds, once per overload")
+def stub_docstrings() -> None:
+    root = WORK / "stubs-docs"
+    widget = _jclass(
+        "Widget",
+        methods=(
+            _jmethod("size", returns="int", descriptor="()I"),
+            _jmethod("make", params=("int",), returns="Widget", descriptor="(I)Lnet/example/Widget;"),
+            _jmethod(
+                "make",
+                params=("java.lang.String",),
+                returns="Widget",
+                descriptor="(Ljava/lang/String;)Lnet/example/Widget;",
+            ),
+        ),
+        constructors=(_jconstructor("()V"), _jconstructor("(I)V")),
+    )
+    overlay = Overlay(
+        {
+            "source": {"artifact": "parchment"},
+            "classes": {
+                "net.example.Widget": {
+                    "javadoc": ["A widget the game owns.", "<p>Second paragraph.</p>"],
+                    "methods": [
+                        {"name": "size", "descriptor": "()I", "javadoc": ["How big it is."]},
+                        {
+                            "name": "make",
+                            "descriptor": "(I)Lnet/example/Widget;",
+                            "javadoc": ["Build one from a count."],
+                        },
+                        {"name": "<init>", "descriptor": "(I)V", "javadoc": ["Build one."]},
+                        {"name": "make", "descriptor": "(Ljava/lang/String;)Lnet/example/Widget;"},
+                    ],
+                }
+            },
+        }
+    )
+    _ = _generate(root, {"net.example.Widget": widget}, ("net.example.Widget",), overlay=overlay)
+    source = (root / "net/example/__init__.pyi").read_text(encoding="utf-8")
+    parsed = ast.parse(source)
+    widget_def = next(node for node in parsed.body if isinstance(node, ast.ClassDef))
+    assert widget_def.body[0].value.value == "A widget the game owns.\n\nSecond paragraph.", widget_def.body[0]
+
+    documented = [stmt for stmt in ast.walk(widget_def) if isinstance(stmt, ast.FunctionDef) and stmt.body[0].value]
+    written = [stmt.body[0].value.value for stmt in documented if isinstance(stmt.body[0].value, ast.Constant)]
+    assert written.count("How big it is.") == 1, written
+    assert written.count("Build one from a count.") == 1, written
+    assert written.count("Build one.") == 1, written
+    assert source.count("Build one from a count.") == 1, "an overload carries the doc once"
+
+
+@check("with no data, a stub carries no docstring at all")
+def stub_without_docs() -> None:
+    root = WORK / "stubs-nodocs"
+    widget = _jclass("Widget", methods=(_jmethod("size", returns="int"),))
+    _ = _generate(root, {"net.example.Widget": widget}, ("net.example.Widget",))
+    source = (root / "net/example/__init__.pyi").read_text(encoding="utf-8")
+    widget_def = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef))
+    assert not any(isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) for stmt in widget_def.body)
+
+    empty = Overlay({"classes": {}})
+    assert empty.class_doc("net.example.Widget") == ""
+    assert empty.method_doc("net.example.Widget", "size", "()I") == ""
+    assert empty.parameter_names("net.example.Widget", "size", "()I") == {}
 
 
 def main() -> int:
