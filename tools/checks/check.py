@@ -911,6 +911,30 @@ def stale_package_marker_is_replaced() -> None:
     assert marker.read_text(encoding="utf-8") == "", marker.read_text(encoding="utf-8")
 
 
+@check("the bytes belong to the class, whatever order the reflection answered in")
+def stubs_ignore_reflection_order() -> None:
+    root = WORK / "stubs-order"
+    methods = (
+        _jmethod("alpha", returns="int", descriptor="()I"),
+        _jmethod("beta", params=("int",), descriptor="(I)V"),
+        _jmethod("beta", params=("java.lang.String",), descriptor="(Ljava/lang/String;)V"),
+    )
+    fields = (_jfield("ZED", "int"), _jfield("ABLE", "java.lang.String"))
+    forward = {
+        "net.example.Widget": _jclass("Widget", methods=methods, fields=fields),
+        "net.example.Gadget": _jclass("Gadget", bases=("net.example.Widget",)),
+    }
+    backward = {
+        "net.example.Gadget": _jclass("Gadget", bases=("net.example.Widget",)),
+        "net.example.Widget": _jclass("Widget", methods=tuple(reversed(methods)), fields=tuple(reversed(fields))),
+    }
+    _ = _generate(root, forward, tuple(forward))
+    first = (root / "net/example/__init__.pyi").read_text(encoding="utf-8")
+    _ = _generate(root, backward, tuple(backward))
+    second = (root / "net/example/__init__.pyi").read_text(encoding="utf-8")
+    assert first == second, "a class's bytes come from the class, not from the order reflection answered in"
+
+
 def main() -> int:
     failures = 0
     for what, case in CHECKS:
