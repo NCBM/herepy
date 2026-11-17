@@ -921,12 +921,11 @@ private static int precompile(File tree, String abi, List<String> launcher) {
 /**
  * Write the runtime as a tar.gz a release could publish.
  *
- * A dev tree carries `scripts/`, `typings/` and the class dumps beside the install tree, so the archive names
- * what it leaves out rather than what it takes: a file added to the runtime later should not silently vanish
- * from what ships.
+ * A dev tree carries `scripts/` and `typings/` beside the install tree, so the archive names what it leaves out
+ * rather than what it takes: a file added to the runtime later should not silently vanish from what ships.
  */
 private static int archiveRuntime(File runtime, File archive) {
-    List<String> notShipped = ['scripts', 'typings', 'java-classes.txt', 'neoforge-classes.txt']
+    List<String> notShipped = ['scripts', 'typings']
     archive.parentFile.mkdirs()
     int[] entries = [0]
     Path root = runtime.toPath().toAbsolutePath().normalize()

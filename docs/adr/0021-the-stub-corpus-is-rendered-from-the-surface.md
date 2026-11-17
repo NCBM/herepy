@@ -24,7 +24,7 @@ The corpus is generated, and what it contains is decided by the surface:
   classpath holds; it never decides what is generated.
 - **A module is rendered from every class it holds and written whole.** A run replaces what an earlier run wrote and
   removes modules whose classes have left the set, so the output tree holds what the last run decided and nothing
-  else. Two runs over the same class list produce the same bytes.
+  else. Two runs over the same surface produce the same bytes.
 - **A module is checked before it is written.** It is parsed, and every declared name — class, member, parameter — is
   checked to be a Python identifier. A class that would leave its module unparseable is left out and named in the
   report.
