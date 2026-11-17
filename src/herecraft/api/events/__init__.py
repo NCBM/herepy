@@ -12,7 +12,7 @@ Usage::
 
 from ._base import Event
 from .block import BlockBreakEvent, BlockPlaceEvent
-from .entity import EntityJoinLevelEvent, LivingDeathEvent, LivingHurtEvent
+from .entity import EntityJoinLevelEvent, LivingDamageEvent, LivingDeathEvent
 from .player import (
     AttackEntityEvent,
     PlayerChangedDimensionEvent,
@@ -30,8 +30,8 @@ __all__ = [
     "BlockPlaceEvent",
     "EntityJoinLevelEvent",
     "Event",
+    "LivingDamageEvent",
     "LivingDeathEvent",
-    "LivingHurtEvent",
     "PlayerChangedDimensionEvent",
     "PlayerEvent",
     "PlayerInteractEvent",

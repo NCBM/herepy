@@ -26,10 +26,14 @@ class LivingDeathEvent(Event):
         return Entity(src)
 
 
-class LivingHurtEvent(Event):
-    """Wraps net.neoforged.neoforge.event.entity.living.LivingHurtEvent."""
+class LivingDamageEvent(Event):
+    """Wraps net.neoforged.neoforge.event.entity.living.LivingDamageEvent$Pre.
 
-    __java_class_name__: ClassVar[str] = "net.neoforged.neoforge.event.entity.living.LivingHurtEvent"
+    NeoForge splits damage into a phase before it lands and one after, so `Pre` is the cancellable one and the
+    only one whose amount can still be set.
+    """
+
+    __java_class_name__: ClassVar[str] = "net.neoforged.neoforge.event.entity.living.LivingDamageEvent$Pre"
     __side__: ClassVar[Side] = Side.BOTH
 
     @property
@@ -38,11 +42,11 @@ class LivingHurtEvent(Event):
 
     @property
     def amount(self) -> float:
-        return float(self._jobj.getAmount())
+        return float(self._jobj.getNewDamage())
 
     @amount.setter
     def amount(self, value: float) -> None:
-        self._jobj.setAmount(value)
+        self._jobj.setNewDamage(value)
 
     @property
     def source_entity(self) -> Entity | None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from herecraft.api._registry import register_wrapper
 
 from .block import BlockBreakEvent, BlockPlaceEvent
-from .entity import EntityJoinLevelEvent, LivingDeathEvent, LivingHurtEvent
+from .entity import EntityJoinLevelEvent, LivingDamageEvent, LivingDeathEvent
 from .player import (
     AttackEntityEvent,
     PlayerChangedDimensionEvent,
@@ -37,7 +37,7 @@ def _register_event_wrappers() -> None:
         BlockPlaceEvent,
         # Entity
         LivingDeathEvent,
-        LivingHurtEvent,
+        LivingDamageEvent,
         EntityJoinLevelEvent,
     ]
     for evt_cls in _events:
