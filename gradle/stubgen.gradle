@@ -1,0 +1,113 @@
+// Produces the stub generator's data: Parchment's parameter names and docstrings, projected into the shape the
+// generator reads (ADR 0021 — the toolchain's inputs are this repository's to build).
+//
+//   ./gradlew writeParchment      -> build/stubgen/parchment.json
+//
+// The artifact is resolved from the pair in gradle.properties that NeoGradle decompiles with, so the names a stub
+// shows come from the same mapping the game's sources do. The projection keeps what a stub needs and drops the
+// rest: per class, per method, the JVM descriptor that separates two overloads, the JVM local slot each named
+// parameter sits in, and the doc exactly as Parchment wrote it. `index` is that slot — 0 is `this`, and a long or
+// a double takes two — so a reader matches it against the width of the parameter types reflection reports,
+// without re-deriving any of it here. The doc is passed through unread: turning its markup into docstring text is
+// `herecraft.stubgen.javadoc`'s job, where a plain string can be checked.
+
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import java.util.zip.ZipFile
+
+def parchmentMinecraft = providers.gradleProperty('neogradle.subsystems.parchment.minecraftVersion')
+def parchmentMappings = providers.gradleProperty('neogradle.subsystems.parchment.mappingsVersion')
+
+if (!parchmentMinecraft.isPresent() || !parchmentMappings.isPresent()) {
+    throw new GradleException("writeParchment reads neogradle.subsystems.parchment.minecraftVersion and " +
+            ".mappingsVersion from gradle.properties, and one of them is missing")
+}
+
+def parchmentCoordinate = "org.parchmentmc.data:parchment-${parchmentMinecraft.get()}:" +
+        "${parchmentMappings.get()}@zip"
+
+repositories {
+    maven {
+        name = 'parchment'
+        url = 'https://maven.parchmentmc.org'
+    }
+}
+
+configurations {
+    parchmentData {
+        canBeConsumed = false
+        canBeResolved = true
+        transitive = false
+    }
+}
+
+dependencies {
+    parchmentData parchmentCoordinate
+}
+
+tasks.register('writeParchment') {
+    group = 'herepy'
+    description = 'Project Parchment\'s names and docstrings into build/stubgen/parchment.json, an input of the ' +
+            'stub generator (ADR 0021).'
+    def archive = configurations.parchmentData
+    def target = layout.buildDirectory.file('stubgen/parchment.json')
+    inputs.files(archive)
+    inputs.property('coordinate', parchmentCoordinate)
+    outputs.file(target)
+    outputs.cacheIf { true }
+    doLast {
+        File zip = archive.singleFile
+        Map raw
+        new ZipFile(zip).withCloseable { ZipFile jar ->
+            def entry = jar.getEntry('parchment.json')
+            if (entry == null) {
+                throw new GradleException("${zip.name} holds no parchment.json")
+            }
+            raw = new JsonSlurper().parse(jar.getInputStream(entry), 'UTF-8') as Map
+        }
+
+        Map classes = new TreeMap<String, Map>()
+        (raw.classes ?: []).each { cls ->
+            List<Map> methods = []
+            (cls.methods ?: []).each { method ->
+                List<Map> parameters = (method.parameters ?: []).collect { [index: it.index, name: it.name] }
+                if (parameters.isEmpty() && !method.javadoc) {
+                    return
+                }
+                Map projected = [name: method.name, descriptor: method.descriptor]
+                if (parameters) {
+                    projected.parameters = parameters
+                }
+                if (method.javadoc) {
+                    projected.javadoc = method.javadoc
+                }
+                methods << projected
+            }
+            if (methods.isEmpty() && !cls.javadoc) {
+                return
+            }
+            methods.sort { a, b -> "${a.name}${a.descriptor}" <=> "${b.name}${b.descriptor}" }
+            Map projected = [methods: methods]
+            if (cls.javadoc) {
+                projected.javadoc = cls.javadoc
+            }
+            classes.put(String.valueOf(cls.name).replace('/' as char, '.' as char), projected)
+        }
+
+        Map out = [
+                source : [
+                        artifact : parchmentCoordinate,
+                        minecraft: parchmentMinecraft.get(),
+                        mappings : parchmentMappings.get(),
+                ],
+                classes: classes,
+        ]
+        File file = target.get().asFile
+        file.parentFile.mkdirs()
+        file.text = JsonOutput.toJson(out) + '\n'
+        int docs = classes.values().sum { it.javadoc ? 1 : 0 } +
+                classes.values().sum { it.methods.count { method -> method.javadoc } }
+        logger.lifecycle("parchment: ${classes.size()} classes, " +
+                "${classes.values().sum { it.methods.size() }} methods, ${docs} docstrings -> ${file.absolutePath}")
+    }
+}
