@@ -394,32 +394,43 @@ def _jtype(canonical: str) -> _Reflected:
     )
 
 
-def _jparam(index: int, canonical: str) -> _Reflected:
+def _jparam(index: int, canonical: str, vararg: bool = False) -> _Reflected:
     return _Reflected(
         getName=lambda: f"arg{index}",
         isNamePresent=lambda: False,
-        isVarArg=lambda: False,
+        isVarArg=lambda: vararg,
         getType=lambda: _jtype(canonical),
     )
 
 
-def _jmethod(name: str, params: tuple[str, ...] = (), returns: str = "void", descriptor: str = "()V") -> _Reflected:
+def _jmethod(
+    name: str,
+    params: tuple[str, ...] = (),
+    returns: str = "void",
+    descriptor: str = "()V",
+    *,
+    static: bool = False,
+    varargs: bool = False,
+) -> _Reflected:
     return _Reflected(
         getName=lambda: name,
         getDescriptor=lambda: descriptor,
         isAbstract=lambda: False,
-        isStatic=lambda: False,
+        isStatic=lambda: static,
         isFinal=lambda: False,
         getReturnType=lambda: _jtype(returns),
-        getParameters=lambda: [_jparam(index, canonical) for index, canonical in enumerate(params)],
+        getParameters=lambda: [
+            _jparam(index, canonical, vararg=varargs and index == len(params) - 1)
+            for index, canonical in enumerate(params)
+        ],
         getTypeParameters=lambda: [],
     )
 
 
-def _jconstructor(descriptor: str = "()V") -> _Reflected:
+def _jconstructor(descriptor: str = "()V", params: tuple[str, ...] = ()) -> _Reflected:
     return _Reflected(
         getDescriptor=lambda: descriptor,
-        getParameters=lambda: [],
+        getParameters=lambda: [_jparam(index, canonical) for index, canonical in enumerate(params)],
         getTypeParameters=lambda: [],
     )
 
@@ -467,7 +478,7 @@ def _generate(
     generator = StubGenerator(root, wrapper=_Wrapper(classes), classloader=_Loader(), overlay=overlay)
     report = StubReport()
     for names in batches:
-        report.update(generator.generate_batch(names).outcomes)
+        report.merge(generator.generate_batch(names))
     _ = generator.prune()
     return report
 
@@ -614,6 +625,72 @@ def stub_without_docs() -> None:
     assert empty.class_doc("net.example.Widget") == ""
     assert empty.method_doc("net.example.Widget", "size", "()I") == ""
     assert empty.parameter_names("net.example.Widget", "size", "()I") == {}
+
+
+@check("a parameter takes the name the data gives its slot, and keeps argN where the data has none")
+def stub_parameter_names() -> None:
+    root = WORK / "stubs-params"
+    widget = _jclass(
+        "Widget",
+        methods=(
+            _jmethod(
+                "place",
+                params=("int", "double", "long", "java.lang.String"),
+                descriptor="(IDJLjava/lang/String;)V",
+            ),
+            _jmethod("sum", params=("long",), varargs=True, returns="long", descriptor="([J)J"),
+            _jmethod("only", params=("int", "int"), descriptor="(II)V"),
+            _jmethod("described", static=True, params=("int",), descriptor="(I)V"),
+        ),
+        constructors=(_jconstructor("(DJ)V", ("double", "long")),),
+    )
+    overlay = Overlay(
+        {
+            "classes": {
+                "net.example.Widget": {
+                    "methods": [
+                        {
+                            "name": "place",
+                            "descriptor": "(IDJLjava/lang/String;)V",
+                            "parameters": [
+                                {"index": 1, "name": "x"},
+                                {"index": 2, "name": "y"},
+                                {"index": 4, "name": "z"},
+                                {"index": 6, "name": "label"},
+                            ],
+                        },
+                        {
+                            "name": "sum",
+                            "descriptor": "([J)J",
+                            "parameters": [{"index": 1, "name": "values"}],
+                        },
+                        {"name": "only", "descriptor": "(II)V", "parameters": [{"index": 1, "name": "count"}]},
+                        {"name": "described", "descriptor": "(I)V", "parameters": [{"index": 0, "name": "size"}]},
+                        {
+                            "name": "<init>",
+                            "descriptor": "(DJ)V",
+                            "parameters": [{"index": 1, "name": "x"}, {"index": 3, "name": "y"}],
+                        },
+                    ]
+                }
+            }
+        }
+    )
+    report = _generate(root, {"net.example.Widget": widget}, ("net.example.Widget",), overlay=overlay)
+    source = (root / "net/example/__init__.pyi").read_text(encoding="utf-8")
+    widget_def = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef))
+    arguments = {
+        node.name: [arg.arg for arg in node.args.posonlyargs]
+        + ([node.args.vararg.arg] if node.args.vararg is not None else [])
+        for node in widget_def.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    assert arguments["place"] == ["self", "x", "y", "z", "label"], arguments["place"]
+    assert arguments["sum"] == ["self", "values"], "a varargs parameter is one slot, whatever its component is"
+    assert arguments["only"] == ["self", "count", "arg1"], "what the data does not cover stays argN"
+    assert arguments["described"] == ["size"], "a static member starts at slot 0"
+    assert arguments["__init__"] == ["self", "x", "y"], arguments["__init__"]
+    assert report.named == 9, report.as_dict()["applied"]
 
 
 def main() -> int:
