@@ -42,9 +42,9 @@ The corpus is generated, and what it contains is decided by the surface:
   same data, with its markup turned into the text a stub shows. The overlay is keyed by class, method and JVM
   descriptor, which survives a recompilation. Where no data covers a member, `argN` is written and the report counts
   it.
-- **The toolchain's inputs are this repository's to build.** The class list, the name data and the stub corpus are
-  derivatives of the development toolchain, produced here from the versions in `gradle.properties`. The generator
-  reads them from the build tree; a path inside a tool's private cache is not an input.
+- **The toolchain's inputs are this repository's to build.** The name data and the stub corpus are derivatives of
+  the development toolchain, produced here from the versions in `gradle.properties`. The generator reads them from
+  the build tree; a path inside a tool's private cache is not an input.
 - **The generator is a unit that runs on demand.** It takes its seed classes and its output directory as arguments and
   runs in a process that already has the classpath — a command, or a script pack entry. The mod's boot generates
   nothing (ADR 0004), and a mod that wants stubs for its own classes runs the same unit against its own jar.
