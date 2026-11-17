@@ -29,6 +29,7 @@ file keeps the reason it stopped being true. Status vocabulary is in
 | [0018](0018-each-loading-phase-has-one-owner.md) | Each loading phase has one owner, and a script pack is one unit | accepted |
 | [0019](0019-the-jar-carries-only-the-core.md) | The jar carries only the core, and the script track is always a second file | accepted |
 | [0020](0020-the-runtime-is-published-per-target-and-fetched-on-demand.md) | The runtime is published per target and fetched on demand, and a runtime on disk is used first | proposed |
+| [0021](0021-the-stub-corpus-is-rendered-from-the-surface.md) | The stub corpus is rendered from the surface, and a patch is an overlay | proposed |
 
 Records 0005 and 0007 were folded into [0018](0018-each-loading-phase-has-one-owner.md), so their numbers stay
 unused and every surviving reference still names the same decision. A record that has entered a commit keeps its
@@ -52,3 +53,4 @@ runs/client/python/bin/python3 tools/checks/check.py
 | 0015 | the packaged runtime (48 MB, no `bin/`, no `pip`, no numpy, no Tcl/Tk) boots the game with the dev tree's stub-generator baseline; a Windows tree unpacks to 69 MB; `libjep.so` needs `libpython3.13.so.1.0`; the Windows tree archives to 24.8 MB and the extracted archive passes the Wine probe |
 | 0016 | Wine runs the Windows CPython and the pinned numpy wheel, imports a `.pyd` built with msvc-wine, and a Windows JVM under Wine answered `python 3.13.18`, `numpy 2.5.5`, `sum 45.0`; `PythonManager` in that JVM answered the Windows layout's `Lib`, `jep.dll` and `python313.dll` |
 | 0018 | the Python-side cases are in [`tools/checks/check.py`](../../tools/checks/check.py): packages rooted at a directory and at a `.pyz`, the stale-`.pyc` trap and both cures, discovery, the `api` refusal before import, a failed load leaving nothing behind, both markers, the reload swap, and a command that goes when its unit does. The dev client logged `1 of 1 units loaded`, loaded before the server started, and put `[scriptive reload]` on the dispatcher |
+| 0021 | the renderer's cases are in [`tools/checks/check.py`](../../tools/checks/check.py), on a stand-in classpath: two runs over the same classes write the same bytes with each class once, a class that leaves the set loses its stub, a member no expression can spell is left out of its class and reported, and a class name no import can spell is rejected and writes nothing |
