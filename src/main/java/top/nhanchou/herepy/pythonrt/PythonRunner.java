@@ -10,6 +10,8 @@ import org.slf4j.Logger;
 import com.mojang.logging.LogUtils;
 
 import jep.Interpreter;
+import jep.JepConfig;
+import jep.JepException;
 import jep.SharedInterpreter;
 
 /**
@@ -56,6 +58,7 @@ public class PythonRunner {
         if (thread != null) {
             throw new IllegalStateException("The Python host thread is already started.");
         }
+        handJepTheGameLoader();
         thread = new Thread(() -> run(init), "herecraft-python");
         // Nothing joins this thread at shutdown, so it may not be what keeps the JVM alive: the loop
         // stops when close() is called, and a mod whose loader never calls it should still exit.
@@ -132,6 +135,34 @@ public class PythonRunner {
         }
         if (thread.isAlive()) {
             LOGGER.warn("The Python host thread did not stop within 5 s");
+        }
+    }
+
+    /**
+     * Point jep's import hook at the loader the game's classes live in.
+     *
+     * jep resolves an import through its own class loader, which is the one that loaded jep and sees none of the
+     * classes a mod loader defines; {@code from net.minecraft.world.item import ItemStack} then fails with a
+     * {@code ClassNotFoundException}. The keystone is the context loader of the thread the game runs on, and
+     * jep takes it as configuration: the importer only passes that loader to {@code loadClass}.
+     *
+     * {@link SharedInterpreter#setConfig} is static and takes the one config for the process, so it has to run
+     * before any {@code SharedInterpreter} exists. A mod that made one first is what the catch reports: the mod
+     * still runs, and the import hook keeps jep's own loader.
+     *
+     * The class loader is the whole correction. An enquirer of our own would answer for the packages {@code
+     * ClassList} does not know, and {@code java_import_hook.setupImporter} installs one importer per process, so a
+     * replacement has to delegate to {@code ClassList} in all three of its methods: measured, an enquirer that
+     * answered only for its own package left {@code from java.util import ArrayList} failing with
+     * {@code No module named 'java'}.
+     */
+    private static void handJepTheGameLoader() {
+        ClassLoader loader = Thread.currentThread().getContextClassLoader();
+        try {
+            SharedInterpreter.setConfig(new JepConfig().setClassLoader(loader));
+            LOGGER.debug("jep resolves imported classes through {}", loader);
+        } catch (JepException e) {
+            LOGGER.warn("Could not hand jep the game's class loader: {}", e.getMessage());
         }
     }
 
