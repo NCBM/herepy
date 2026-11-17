@@ -60,4 +60,5 @@ tree. The exploration that produced it does not appear.
 | the Java/Python boundary as a protocol | ADR [0002](docs/adr/0002-the-java-python-boundary-is-a-versioned-protocol.md) |
 | a Java call jep refuses, or a command that parses and then runs nothing | [`docs/develop/known-traps/`](docs/develop/known-traps/README.md), each with the source line or bytecode that decides it |
 | what the stub corpus holds, and where a correction to one goes | ADR [0021](docs/adr/0021-the-stub-corpus-is-rendered-from-the-surface.md) |
+| how a script reaches a Java class the api does not wrap | ADR [0022](docs/adr/0022-jep-imports-resolve-through-the-games-loader.md) |
 | how a decision gets made or changed | ADR [0001](docs/adr/0001-decisions-are-recorded-here.md) |
