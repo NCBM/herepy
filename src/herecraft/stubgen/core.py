@@ -117,6 +117,20 @@ _TYPING_NAMES = frozenset({"Any", "ClassVar", "Final", "final", "overload"})
 _ABC_NAMES = frozenset({"abstractmethod"})
 
 
+def reflection(wrapper: type[Any] | None = None, classloader: Any = None) -> tuple[type[Any], Any]:
+    """What reflection reaches through: the arguments, or the game's when they are not given."""
+    if wrapper is None:
+        from herecraft._internals.javans import ReflectWrapper
+
+        wrapper = ReflectWrapper
+    # The context loader sees the classes mod loaders define as well as the JDK's
+    if classloader is None:
+        from java.lang import Thread
+
+        classloader = Thread.currentThread().getContextClassLoader()
+    return wrapper, classloader
+
+
 class _ImportTracker:
     """Tracks which names from each module are actually used while building a stub."""
 
@@ -261,15 +275,7 @@ class StubGenerator:
         `overlay` is the data the class files do not carry: parameter names and docstrings (ADR 0021).
         """
         self.output_dir = Path(output_dir)
-        if wrapper is None:
-            from herecraft._internals.javans import ReflectWrapper
-
-            wrapper = ReflectWrapper
-        # The context loader sees the classes mod loaders define as well as the JDK's
-        if classloader is None:
-            from java.lang import Thread
-
-            classloader = Thread.currentThread().getContextClassLoader()
+        wrapper, classloader = reflection(wrapper, classloader)
         self._wrapper: type[Any] = wrapper
         self._classloader: Any = classloader
         self._overlay: Overlay | None = overlay
@@ -286,6 +292,20 @@ class StubGenerator:
         """Generate the stub for one Java class."""
         return self.generate_batch([java_class_name])
 
+    def generate_surface(self, seeds: Iterable[str]) -> StubReport:
+        """Render what the seeds reach, and nothing else (ADR 0021).
+
+        The seeds are the names the surface declares; the class set is their closure, so a name the surface
+        reaches comes with the class it names, and a class no unit can reach stays out of the corpus.
+        """
+        from .surface import closure  # the walk reads this module's name tables, so it is imported on use
+
+        reach = closure(seeds, wrapper=self._wrapper, classloader=self._classloader)
+        report = self.generate_batch(reach.classes)
+        for name, reason in reach.missing.items():
+            report.record(name, Outcome("failed", reason=f"cannot be reached: {reason}"))
+        return report
+
     def generate_batch(self, class_names: Iterable[str]) -> StubReport:
         """Reflect every class, then render each module its classes name, whole.
 
@@ -295,7 +315,7 @@ class StubGenerator:
         report = StubReport()
         reflected: dict[str, Any] = {}
         for name in class_names:
-            if not _is_stubgable(name):
+            if not is_stubgable(name):
                 report.record(name, Outcome("rejected", reason="the name is not a Python identifier"))
                 continue
             try:
@@ -772,7 +792,7 @@ def _parse_patch_stubs(snippets: list[str], tracker: _ImportTracker) -> list[ast
     return results
 
 
-def _is_stubgable(java_class_name: str) -> bool:
+def is_stubgable(java_class_name: str) -> bool:
     """Return False for class names that cannot be represented as valid Python identifiers."""
     simple = java_class_name.rsplit(".", 1)[-1]
     # package-info, module-info, and any name with hyphens are invalid Python identifiers
