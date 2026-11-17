@@ -334,7 +334,7 @@ class StubGenerator:
         for path, entries in by_file.items():
             module = self._modules[path]
             outcomes: dict[str, Outcome] = {}
-            for name, rcls in _topo_sort(entries):
+            for name, rcls in _topo_sort(sorted(entries)):
                 class_def = self._build_class(rcls, module.tracker, rcls.getPackageName())
                 module.classes[name] = class_def
                 outcomes[name] = Outcome("written", path, omitted=_drop_unnameable(class_def))
@@ -400,21 +400,27 @@ class StubGenerator:
 
         body: list[ast.stmt] = []
 
-        for inner in rcls.getInnerClasses():
+        # Reflection answers in no fixed order — `getMethods` came out differently between two runs of the same
+        # class — so every list a stub holds is ordered by what the class file fixes: a name, or a descriptor.
+        for inner in sorted(rcls.getInnerClasses(), key=_binary_name):
             body.append(self._build_class(inner, tracker, own_package))
 
-        for field in rcls.getFields():
+        for field in sorted(rcls.getFields(), key=_member_name):
             body.append(self._build_field(field, tracker, own_package))
 
         methods_by_name: dict[str, list[Any]] = {}
         for method in rcls.getMethods():
             methods_by_name.setdefault(method.getName(), []).append(method)
-        for methods in methods_by_name.values():
-            body.extend(self._build_method(rcls.getName(), methods, tracker, own_package))
+        for name in sorted(methods_by_name):
+            body.extend(
+                self._build_method(rcls.getName(), sorted(methods_by_name[name], key=_descriptor), tracker, own_package)
+            )
 
         constructors = list(rcls.getConstructors())
         if constructors:
-            body.extend(self._build_constructor(rcls.getName(), constructors, tracker, own_package))
+            body.extend(
+                self._build_constructor(rcls.getName(), sorted(constructors, key=_descriptor), tracker, own_package)
+            )
 
         # Inject JEP-provided dunder methods for patched interfaces
         canonical = rcls.getCanonicalName()
@@ -707,6 +713,21 @@ def _output_path(output_dir: Path, java_class_name: str) -> Path:
     if not package:
         return output_dir / f"{java_class_name}.pyi"
     return output_dir.joinpath(*package, "__init__.pyi")
+
+
+def _member_name(member: Any) -> str:
+    """The name a member declares."""
+    return str(member.getName())
+
+
+def _binary_name(rcls: Any) -> str:
+    """A class's binary name, which is what tells it apart from its siblings."""
+    return str(rcls.getName())
+
+
+def _descriptor(member: Any) -> str:
+    """The JVM descriptor, which tells two overloads of one name apart."""
+    return str(member.getDescriptor())
 
 
 def _topo_sort(entries: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
