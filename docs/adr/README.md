@@ -30,7 +30,7 @@ file keeps the reason it stopped being true. Status vocabulary is in
 | [0019](0019-the-jar-carries-only-the-core.md) | The jar carries only the core, and the script track is always a second file | accepted |
 | [0020](0020-the-runtime-is-published-per-target-and-fetched-on-demand.md) | The runtime is published per target and fetched on demand, and a runtime on disk is used first | proposed |
 | [0021](0021-the-stub-corpus-is-rendered-from-the-surface.md) | The stub corpus is rendered from the surface, and a patch is an overlay | proposed |
-| [0022](0022-jep-imports-resolve-through-the-games-loader.md) | jep's import hook resolves a class through the game's loader | proposed |
+| [0022](0022-jep-imports-resolve-through-the-games-loader.md) | jep's import hook resolves a class through the game's loader | accepted |
 
 Records 0005 and 0007 were folded into [0018](0018-each-loading-phase-has-one-owner.md), so their numbers stay
 unused and every surviving reference still names the same decision. A record that has entered a commit keeps its

@@ -1,6 +1,6 @@
 # 22. jep's import hook resolves a class through the game's loader
 
-**Status**: proposed, 2026-11-17.
+**Status**: accepted, 2026-11-17.
 
 ## Context
 
