@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import ast
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 import keyword
 from logging import getLogger
 from pathlib import Path
-import shutil
-from typing import TYPE_CHECKING, Any, Final
-
-if TYPE_CHECKING:
-    from herecraft._internals.javans import ReflectWrapper
+from typing import Any, Final, Literal
 
 logger = getLogger("herecraft.stubgen.core")
 
@@ -175,143 +172,167 @@ class _ImportTracker:
         return stmts
 
 
+@dataclass(frozen=True)
+class Outcome:
+    """What became of one Java class name."""
+
+    status: Literal["written", "rejected", "failed"]
+    path: Path | None = None
+    reason: str | None = None
+    omitted: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"status": self.status}
+        if self.path is not None:
+            data["path"] = str(self.path)
+        if self.reason is not None:
+            data["reason"] = self.reason
+        if self.omitted:
+            data["omitted"] = list(self.omitted)
+        return data
+
+
+class StubReport:
+    """What a run decided, class by class — the JSON the run leaves beside the stubs."""
+
+    def __init__(self) -> None:
+        self.outcomes: dict[str, Outcome] = {}
+
+    def record(self, name: str, outcome: Outcome) -> None:
+        self.outcomes[name] = outcome
+
+    def update(self, outcomes: dict[str, Outcome]) -> None:
+        self.outcomes.update(outcomes)
+
+    def count(self, status: str) -> int:
+        return sum(1 for outcome in self.outcomes.values() if outcome.status == status)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "summary": {status: self.count(status) for status in ("written", "rejected", "failed")},
+            "classes": {name: self.outcomes[name].as_dict() for name in sorted(self.outcomes)},
+        }
+
+
+class _Module:
+    """One output file: the classes that belong in it, and the imports they need."""
+
+    tracker: _ImportTracker
+    classes: dict[str, ast.ClassDef]
+
+    def __init__(self) -> None:
+        self.tracker = _ImportTracker()
+        self.classes = {}
+
+
 class StubGenerator:
     """Generates Python .pyi stub files from Java classes via ReflectWrapper."""
 
     output_dir: Path
 
-    def __init__(self, output_dir: str) -> None:
+    def __init__(
+        self,
+        output_dir: str | Path,
+        *,
+        wrapper: type[Any] | None = None,
+        classloader: Any = None,
+    ) -> None:
+        """`wrapper` and `classloader` are what the reflection reaches through; both default to the game's."""
         self.output_dir = Path(output_dir)
-        from herecraft._internals.javans import ReflectWrapper
+        if wrapper is None:
+            from herecraft._internals.javans import ReflectWrapper
 
-        self._wrapper: type[ReflectWrapper] = ReflectWrapper
-        # Use context classloader by default so mod-loaded classes are resolvable
-        from java.lang import Thread
+            wrapper = ReflectWrapper
+        # The context loader sees the classes mod loaders define as well as the JDK's
+        if classloader is None:
+            from java.lang import Thread
 
-        self._classloader: Any = Thread.currentThread().getContextClassLoader()
+            classloader = Thread.currentThread().getContextClassLoader()
+        self._wrapper: type[Any] = wrapper
+        self._classloader: Any = classloader
+        self._modules: dict[Path, _Module] = {}
+        self._written: set[Path] = set()
 
     def _load_class(self, java_class_name: str) -> Any:
         """Load a Java class using the stored classloader."""
         return self._classloader.loadClass(java_class_name)
 
-    def generate(self, java_class_name: str) -> Path:
-        """Generate a .pyi stub for a single Java class. Appends to the package file."""
-        if not _is_stubgable(java_class_name):
-            raise ValueError(f"Skipping non-stubgable class: {java_class_name}")
-        jclass = self._load_class(java_class_name)
-        rcls = self._wrapper.forClass(jclass)
-        return self._write_class(rcls, java_class_name)
+    def generate(self, java_class_name: str) -> StubReport:
+        """Generate the stub for one Java class."""
+        return self.generate_batch([java_class_name])
 
-    def consolidate(self) -> None:
-        """Merge any flat pkg.pyi into pkg/__init__.pyi where both exist.
-        Also rewrites merged files to have a single unified import header.
+    def generate_batch(self, class_names: Iterable[str]) -> StubReport:
+        """Reflect every class, then render each module its classes name, whole.
+
+        A batch writes the modules it reaches. A later batch that reaches one of them again renders it from
+        every class the generator has seen, so a run's output stays a function of the names it was given.
         """
-        seen_dirs: set[Path] = set()
-        for pyi in sorted(self.output_dir.rglob("*.pyi")):
-            sibling_dir = pyi.with_suffix("")
-            if sibling_dir.is_dir():
-                init = sibling_dir / "__init__.pyi"
-                content = pyi.read_text(encoding="utf-8")
-                if init.exists():
-                    with open(init, "a", encoding="utf-8") as f:
-                        _ = f.write("\n\n")
-                        _ = f.write(content)
-                    seen_dirs.add(init)
-                else:
-                    _ = shutil.move(str(pyi), str(init))
-                    seen_dirs.add(init)
-                    continue
-                pyi.unlink()
-                logger.info("Consolidated %s -> %s", pyi, init)
-
-        for pyi in self.output_dir.rglob("*.pyi"):
-            _unify_imports(pyi)
-
-    def _write_classes_to_file(self, path: Path, tracker: _ImportTracker, class_defs: list[ast.ClassDef]) -> None:
-        """Write (or append) class definitions to a stub file.
-
-        On first write: full header + classes.
-        On append: classes only — the file header is rewritten via rewrite_imports().
-        """
-        if not path.exists():
-            body: list[ast.stmt] = [*tracker.build_imports(), *class_defs]
-            source = ast.unparse(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])))
-            _ = path.write_text(source + "\n\n", encoding="utf-8")
-        else:
-            # Append only class defs, then rewrite the import header
-            class_source = "\n\n".join(ast.unparse(ast.fix_missing_locations(cd)) for cd in class_defs)
-            with open(path, "a", encoding="utf-8") as f:
-                _ = f.write("\n\n")
-                _ = f.write(class_source)
-                _ = f.write("\n\n")
-            self._rewrite_imports(path, tracker)
-
-    def _rewrite_imports(self, path: Path, new_tracker: _ImportTracker) -> None:
-        """Merge new imports into the existing file's import header."""
-        content = path.read_text(encoding="utf-8")
-        lines = content.splitlines(keepends=True)
-
-        # Collect existing import lines at the top (before first class/blank body)
-        import_end = 0
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.startswith("from ") or stripped.startswith("import ") or stripped == "":
-                import_end = i + 1
-            else:
-                break
-
-        existing_imports = "".join(lines[:import_end])
-        rest = "".join(lines[import_end:])
-
-        # Parse existing imports and merge with new tracker
-        merged = _merge_import_source(existing_imports, new_tracker)
-        _ = path.write_text(merged + rest, encoding="utf-8")
-
-    def generate_batch(self, class_names: Iterable[str]) -> dict[str, Path | Exception]:
-        """Generate stubs for multiple classes with per-file dependency sorting."""
-        # Reflect all classes first
+        report = StubReport()
         reflected: dict[str, Any] = {}
-        results: dict[str, Path | Exception] = {}
         for name in class_names:
             if not _is_stubgable(name):
+                report.record(name, Outcome("rejected", reason="the name is not a Python identifier"))
                 continue
             try:
                 reflected[name] = self._wrapper.forClass(self._load_class(name))
-            except Exception as e:
-                logger.warning("Failed to reflect %s: %s", name, e)
-                results[name] = e
+            except Exception as error:
+                logger.warning("Failed to reflect %s: %s", name, error)
+                report.record(name, Outcome("failed", reason=f"{type(error).__name__}: {error}"))
 
-        # Group by output file
         by_file: dict[Path, list[tuple[str, Any]]] = {}
         for name, rcls in reflected.items():
-            path = self._determine_output_path(name)
-            by_file.setdefault(path, []).append((name, rcls))
+            by_file.setdefault(_output_path(self.output_dir, name), []).append((name, rcls))
 
-        # For each file: sort by intra-file dependency, then write
         for path, entries in by_file.items():
-            ordered = _topo_sort(entries)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tracker = _ImportTracker()
-            own_package = ordered[0][1].getPackageName() if ordered else ""
-            class_defs: list[ast.ClassDef] = []
-            for name, rcls in ordered:
-                class_defs.append(self._build_class(rcls, tracker, own_package))
-            self._write_classes_to_file(path, tracker, class_defs)
-            for name, _ in ordered:
-                results[name] = path
+            module = self._modules.setdefault(path, _Module())
+            outcomes: dict[str, Outcome] = {}
+            for name, rcls in _topo_sort(entries):
+                class_def = self._build_class(rcls, module.tracker, rcls.getPackageName())
+                module.classes[name] = class_def
+                outcomes[name] = Outcome("written", path, omitted=_drop_unnameable(class_def))
+
+            problem = self._write_module(path, module)
+            if problem is not None:
+                logger.warning("%s was left unwritten: %s", path, problem)
+                report.update({name: Outcome("failed", path, reason=problem) for name in outcomes})
+                continue
+            for name in outcomes:
                 logger.info("Generated stub: %s -> %s", name, path)
+            report.update(outcomes)
 
-        return results
+        return report
 
-    def _write_class(self, rcls: Any, java_class_name: str) -> Path:
-        tracker = _ImportTracker()
-        own_package = rcls.getPackageName()
-        class_def = self._build_class(rcls, tracker, own_package)
-        output_path = self._determine_output_path(java_class_name)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_classes_to_file(output_path, tracker, [class_def])
-        logger.info("Generated stub: %s -> %s", java_class_name, output_path)
-        return output_path
+    def _write_module(self, path: Path, module: _Module) -> str | None:
+        """Render a module whole and write it, or say why it was not written."""
+        source = _render(module)
+        problem = _unwritable(source)
+        if problem is not None:
+            return problem
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _ = path.write_text(source, encoding="utf-8")
+        self._written.add(path)
+        parent = path.parent
+        while parent != self.output_dir and self.output_dir in parent.parents:
+            init = parent / "__init__.pyi"
+            if not init.exists():
+                _ = init.write_text("", encoding="utf-8")
+            self._written.add(init)
+            parent = parent.parent
+        return None
+
+    def prune(self) -> int:
+        """Remove the stubs this run did not write, and the directories that leaves empty."""
+        removed = 0
+        for stale in sorted(self.output_dir.rglob("*.pyi")):
+            if stale not in self._written:
+                stale.unlink()
+                removed += 1
+        for directory in sorted((path for path in self.output_dir.rglob("*") if path.is_dir()), reverse=True):
+            if not any(directory.iterdir()):
+                directory.rmdir()
+        if removed:
+            logger.info("Pruned %d stubs the run no longer produces", removed)
+        return removed
 
     def _build_class(self, rcls: Any, tracker: _ImportTracker, own_package: str) -> ast.ClassDef:
         class_name = rcls.getSimpleName().replace("$", "_")
@@ -567,28 +588,13 @@ class StubGenerator:
                 result.append(ast.TypeVar(tv.getName()))
         return result
 
-    def _determine_output_path(self, java_class_name: str) -> Path:
-        parts = java_class_name.split(".")
-        if len(parts) < 2:
-            return self.output_dir / f"{java_class_name}.pyi"
 
-        package_parts = parts[:-1]
-        target = self.output_dir
-
-        for i, part in enumerate(package_parts):
-            target = target / part
-            old_pyi = target.with_suffix(".pyi")
-            is_flat = old_pyi.is_file()
-            if is_flat and target.is_dir():
-                _ = shutil.move(str(old_pyi), str(target / "__init__.pyi"))
-            elif i < len(package_parts) - 1:
-                target.mkdir(parents=True, exist_ok=True)
-                if is_flat:
-                    _ = shutil.move(str(old_pyi), str(target / "__init__.pyi"))
-
-        if target.is_dir():
-            return target / "__init__.pyi"
-        return target.with_suffix(".pyi")
+def _output_path(output_dir: Path, java_class_name: str) -> Path:
+    """The module a class belongs to: a package's `__init__.pyi`, or `<name>.pyi` in the root package."""
+    package = java_class_name.split(".")[:-1]
+    if not package:
+        return output_dir / f"{java_class_name}.pyi"
+    return output_dir.joinpath(*package, "__init__.pyi")
 
 
 def _topo_sort(entries: list[tuple[str, Any]]) -> list[tuple[str, Any]]:
@@ -685,57 +691,62 @@ def _is_stubgable(java_class_name: str) -> bool:
     return simple.isidentifier() and not keyword.iskeyword(simple)
 
 
-def _unify_imports(path: Path) -> None:
-    """Rewrite a .pyi file so all import statements are deduplicated at the top."""
-    content = path.read_text(encoding="utf-8")
-    lines = content.splitlines(keepends=True)
-
-    import_lines: list[str] = []
-    other_lines: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("from ") or stripped.startswith("import "):
-            import_lines.append(stripped)
-        else:
-            other_lines.append(line)
-
-    if not import_lines:
-        return
-
-    merged = _merge_from_imports(list(dict.fromkeys(import_lines)))
-    body = "".join(other_lines).lstrip("\n")
-    _ = path.write_text("\n".join(merged) + "\n\n" + body, encoding="utf-8")
+def _render(module: _Module) -> str:
+    """The whole module: the imports its classes need, then the classes themselves."""
+    body: list[ast.stmt] = [*module.tracker.build_imports(), *module.classes.values()]
+    return ast.unparse(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[]))) + "\n"
 
 
-def _merge_from_imports(import_lines: list[str]) -> list[str]:
-    """Merge `from X import a, b` lines with the same module into one line."""
-    order: list[str] = []
-    by_module: dict[str, set[str]] = {}
-    plain_imports: list[str] = []
-
-    for line in import_lines:
-        if line.startswith("from "):
-            parts = line.split(" import ", 1)
-            if len(parts) == 2:
-                module = parts[0][5:].strip()
-                names = {n.strip() for n in parts[1].split(",")}
-                if module not in by_module:
-                    order.append(module)
-                    by_module[module] = set()
-                by_module[module] |= names
-                continue
-        plain_imports.append(line)
-
-    result = list(plain_imports)
-    for module in order:
-        names = sorted(by_module[module])
-        result.append(f"from {module} import {', '.join(names)}")
-    return result
+def _unwritable(source: str) -> str | None:
+    """Why an assembled module cannot be written, or None when it parses and its names are spellable."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as error:
+        return f"line {error.lineno}: {error.msg}"
+    return next(
+        (f"{name} is not a Python identifier" for name in _written_names(tree) if not name.isidentifier()), None
+    )
 
 
-def _merge_import_source(existing_imports: str, tracker: _ImportTracker) -> str:
-    """Merge existing import text with new tracker imports, return unified import block."""
-    new_lines = [ast.unparse(stmt) for stmt in tracker.build_imports()]
-    existing_lines = [ln.strip() for ln in existing_imports.splitlines() if ln.strip()]
-    all_imports = _merge_from_imports(list(dict.fromkeys(existing_lines + new_lines)))
-    return "\n".join(all_imports) + "\n\n" if all_imports else ""
+def _written_names(tree: ast.AST) -> Iterator[str]:
+    """Every name the module declares, a nested class's members included."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield node.name
+        elif isinstance(node, ast.arg):
+            yield node.arg
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            yield node.target.id
+
+
+def _drop_unnameable(class_def: ast.ClassDef) -> tuple[str, ...]:
+    """Leave out the members no Python expression can spell, and name what was left out."""
+    omitted: list[str] = []
+    kept: list[ast.stmt] = []
+    for stmt in class_def.body:
+        unspellable = [name for name in _declared_names(stmt) if not name.isidentifier()]
+        if unspellable:
+            omitted.extend(unspellable)
+            continue
+        if isinstance(stmt, ast.ClassDef):
+            omitted.extend(_drop_unnameable(stmt))
+        kept.append(stmt)
+    class_def.body = kept or [ast.Expr(ast.Constant(...))]
+    return tuple(omitted)
+
+
+def _declared_names(stmt: ast.stmt) -> list[str]:
+    """The names one statement declares, without descending into a nested class."""
+    if isinstance(stmt, ast.ClassDef):
+        return [stmt.name]
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return [stmt.name, *_argument_names(stmt.args)]
+    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+        return [stmt.target.id]
+    return []
+
+
+def _argument_names(args: ast.arguments) -> list[str]:
+    names = [arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
+    names.extend(arg.arg for arg in (args.vararg, args.kwarg) if arg is not None)
+    return names

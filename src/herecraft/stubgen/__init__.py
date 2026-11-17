@@ -1,5 +1,5 @@
 """herecraft.stubgen — Python stub generation from Java classes."""
 
-from .core import StubGenerator
+from .core import Outcome, StubGenerator, StubReport
 
-__all__ = ["StubGenerator"]
+__all__ = ["Outcome", "StubGenerator", "StubReport"]
