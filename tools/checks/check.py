@@ -84,7 +84,7 @@ from herecraft import event as event_module
 from herecraft.kernel import loader
 from herecraft.kernel import unit as unit_module
 from herecraft.manifest import ManifestError, read_archive, read_directory
-from herecraft.stubgen import Overlay, StubGenerator, StubReport
+from herecraft.stubgen import Overlay, StubGenerator, StubReport, closure, declared_seeds
 
 WORK = pathlib.Path(tempfile.mkdtemp(prefix="herepy-check-"))
 env.install("CLIENT", str(WORK))
@@ -384,29 +384,93 @@ class _Loader:
         return name
 
 
+def _jty(**members: object) -> _Reflected:
+    """A ReflectType stand-in: every question answered, so the walk may ask any of them."""
+    defaults: dict[str, object] = {
+        "getTypeName": lambda: "java.lang.Object",
+        "getCanonicalName": lambda: "java.lang.Object",
+        "isClass": lambda: True,
+        "isParameterized": lambda: False,
+        "isTypeVariable": lambda: False,
+        "isArray": lambda: False,
+        "isWildcard": lambda: False,
+        "isPrimitive": lambda: False,
+        "isVoid": lambda: False,
+        "getRawType": lambda: None,
+        "getActualTypeArguments": lambda: [],
+        "getComponentType": lambda: None,
+        "getUpperBounds": lambda: [],
+        "getLowerBounds": lambda: [],
+    }
+    defaults.update(members)
+    return _Reflected(**defaults)
+
+
 def _jtype(canonical: str) -> _Reflected:
-    return _Reflected(
-        getCanonicalName=lambda: canonical,
-        isArray=lambda: False,
-        isTypeVariable=lambda: False,
-        isWildcard=lambda: False,
-        isParameterized=lambda: False,
+    """A plain class type, which names itself and nothing else."""
+    return _jty(getTypeName=lambda: canonical, getCanonicalName=lambda: canonical)
+
+
+def _as_type(value: str | _Reflected) -> _Reflected:
+    """A type the caller wrote as a name, or one it built to carry type arguments or a component."""
+    return value if isinstance(value, _Reflected) else _jtype(value)
+
+
+def _jparameterized(raw: str, *arguments: _Reflected) -> _Reflected:
+    """`List<Entry>`: the raw class and what the angle brackets carry."""
+    return _jty(
+        isParameterized=lambda: True,
+        isClass=lambda: False,
+        getTypeName=lambda: raw,
+        getCanonicalName=lambda: raw,
+        getRawType=lambda: _jtype(raw),
+        getActualTypeArguments=lambda: list(arguments),
     )
 
 
-def _jparam(index: int, canonical: str, vararg: bool = False) -> _Reflected:
+def _jarray(component: _Reflected) -> _Reflected:
+    """`Cell[]`: the component type is the class a stub names."""
+    return _jty(isArray=lambda: True, isClass=lambda: False, getComponentType=lambda: component)
+
+
+def _jwildcard(*upper: _Reflected, lower: tuple[_Reflected, ...] = ()) -> _Reflected:
+    """`? extends Match`: the bound is the class a stub names."""
+    return _jty(
+        isWildcard=lambda: True,
+        isClass=lambda: False,
+        getUpperBounds=lambda: list(upper),
+        getLowerBounds=lambda: list(lower),
+    )
+
+
+def _jtypevar(name: str, *bounds: _Reflected) -> _Reflected:
+    """`T extends Bound`: a type variable names itself, and names its bound.
+
+    Asked of a ReflectType the bound is `getUpperBounds`; asked of a ReflectTypeVariable — a class's or a
+    method's own parameter — it is `getBounds`. Both answer here, so one stand-in serves either place.
+    """
+    return _jty(
+        isTypeVariable=lambda: True,
+        isClass=lambda: False,
+        getTypeName=lambda: name,
+        getBounds=lambda: list(bounds),
+        getUpperBounds=lambda: list(bounds),
+    )
+
+
+def _jparam(index: int, canonical: str | _Reflected, vararg: bool = False) -> _Reflected:
     return _Reflected(
         getName=lambda: f"arg{index}",
         isNamePresent=lambda: False,
         isVarArg=lambda: vararg,
-        getType=lambda: _jtype(canonical),
+        getType=lambda: _as_type(canonical),
     )
 
 
 def _jmethod(
     name: str,
-    params: tuple[str, ...] = (),
-    returns: str = "void",
+    params: tuple[str | _Reflected, ...] = (),
+    returns: str | _Reflected = "void",
     descriptor: str = "()V",
     *,
     static: bool = False,
@@ -418,7 +482,7 @@ def _jmethod(
         isAbstract=lambda: False,
         isStatic=lambda: static,
         isFinal=lambda: False,
-        getReturnType=lambda: _jtype(returns),
+        getReturnType=lambda: _as_type(returns),
         getParameters=lambda: [
             _jparam(index, canonical, vararg=varargs and index == len(params) - 1)
             for index, canonical in enumerate(params)
@@ -427,7 +491,7 @@ def _jmethod(
     )
 
 
-def _jconstructor(descriptor: str = "()V", params: tuple[str, ...] = ()) -> _Reflected:
+def _jconstructor(descriptor: str = "()V", params: tuple[str | _Reflected, ...] = ()) -> _Reflected:
     return _Reflected(
         getDescriptor=lambda: descriptor,
         getParameters=lambda: [_jparam(index, canonical) for index, canonical in enumerate(params)],
@@ -435,12 +499,12 @@ def _jconstructor(descriptor: str = "()V", params: tuple[str, ...] = ()) -> _Ref
     )
 
 
-def _jfield(name: str, canonical: str) -> _Reflected:
+def _jfield(name: str, canonical: str | _Reflected) -> _Reflected:
     return _Reflected(
         getName=lambda: name,
         isStatic=lambda: False,
         isFinal=lambda: True,
-        getGenericType=lambda: _jtype(canonical),
+        getGenericType=lambda: _as_type(canonical),
     )
 
 
@@ -448,23 +512,42 @@ def _jclass(
     simple: str,
     *,
     package: str = "net.example",
-    bases: tuple[str, ...] = (),
+    bases: tuple[str | _Reflected, ...] = (),
     methods: tuple[_Reflected, ...] = (),
     fields: tuple[_Reflected, ...] = (),
     constructors: tuple[_Reflected, ...] = (),
+    inner: tuple[_Reflected, ...] = (),
+    type_params: tuple[_Reflected, ...] = (),
 ) -> _Reflected:
     return _Reflected(
         getName=lambda: f"{package}.{simple}",
         getSimpleName=lambda: simple,
         getCanonicalName=lambda: f"{package}.{simple}",
         getPackageName=lambda: package,
-        getGenericSuperclass=lambda: _jtype(bases[0]) if bases else None,
-        getGenericInterfaces=lambda: [_jtype(base) for base in bases[1:]],
-        getTypeParameters=lambda: [],
-        getInnerClasses=lambda: [],
+        getGenericSuperclass=lambda: _as_type(bases[0]) if bases else None,
+        getGenericInterfaces=lambda: [_as_type(base) for base in bases[1:]],
+        getTypeParameters=lambda: list(type_params),
+        getInnerClasses=lambda: list(inner),
         getMethods=lambda: list(methods),
         getFields=lambda: list(fields),
         getConstructors=lambda: list(constructors),
+    )
+
+
+def _jnested(outer: str, simple: str, *, fields: tuple[_Reflected, ...] = ()) -> _Reflected:
+    """A nested class as `getInnerClasses` hands one over: its binary name, and what its members name."""
+    return _Reflected(
+        getName=lambda: f"{outer}${simple}",
+        getSimpleName=lambda: simple,
+        getCanonicalName=lambda: f"{outer}.{simple}",
+        getPackageName=lambda: outer.rsplit(".", 1)[0],
+        getGenericSuperclass=lambda: None,
+        getGenericInterfaces=lambda: [],
+        getTypeParameters=lambda: [],
+        getInnerClasses=lambda: [],
+        getMethods=lambda: [],
+        getFields=lambda: list(fields),
+        getConstructors=lambda: [],
     )
 
 
@@ -691,6 +774,127 @@ def stub_parameter_names() -> None:
     assert arguments["described"] == ["size"], "a static member starts at slot 0"
     assert arguments["__init__"] == ["self", "x", "y"], arguments["__init__"]
     assert report.named == 9, report.as_dict()["applied"]
+
+
+@check("the corpus is what the seeds reach, transitively, and nothing else")
+def surface_closure() -> None:
+    classes = {
+        "net.example.Widget": _jclass(
+            "Widget",
+            bases=("net.example.Base",),
+            fields=(_jfield("label", "net.example.Label"),),
+            methods=(_jmethod("at", returns="net.example.Pos"),),
+        ),
+        "net.example.Base": _jclass("Base"),
+        "net.example.Label": _jclass("Label"),
+        "net.example.Pos": _jclass("Pos", fields=(_jfield("world", "net.example.World"),)),
+        "net.example.World": _jclass("World"),
+        "net.example.Unreached": _jclass("Unreached"),
+    }
+    reach = closure(("net.example.Widget",), wrapper=_Wrapper(classes), classloader=_Loader())
+    assert reach.classes == (
+        "net.example.Base",
+        "net.example.Label",
+        "net.example.Pos",
+        "net.example.Widget",
+        "net.example.World",
+    ), reach.classes
+    assert not reach.missing, reach.missing
+
+
+@check("a type argument, an array component, a wildcard bound and a type parameter bound each bring a class")
+def surface_closure_types() -> None:
+    classes = {
+        "net.example.Widget": _jclass(
+            "Widget",
+            type_params=(_jtypevar("T", _jtype("net.example.Bound")),),
+            methods=(
+                _jmethod("entries", returns=_jparameterized("java.util.List", _jtype("net.example.Entry"))),
+                _jmethod("cells", params=(_jarray(_jtype("net.example.Cell")),)),
+                _jmethod("match", returns=_jwildcard(_jtype("net.example.Match"))),
+                _jmethod("value", returns=_jtypevar("V", _jtype("net.example.Value"))),
+            ),
+            fields=(
+                _jfield(
+                    "names",
+                    _jparameterized("java.util.Map", _jtype("java.lang.String"), _jtype("net.example.Name")),
+                ),
+            ),
+        ),
+    }
+    for simple in ("Bound", "Entry", "Cell", "Match", "Value", "Name"):
+        classes[f"net.example.{simple}"] = _jclass(simple)
+    reach = closure(("net.example.Widget",), wrapper=_Wrapper(classes), classloader=_Loader())
+    assert reach.classes == (
+        "net.example.Bound",
+        "net.example.Cell",
+        "net.example.Entry",
+        "net.example.Match",
+        "net.example.Name",
+        "net.example.Value",
+        "net.example.Widget",
+    ), reach.classes
+    assert not reach.missing, reach.missing
+
+
+@check("a name that carries a nested class renders the class that declares it, seed or reference")
+def surface_closure_nested() -> None:
+    nested = _jnested("net.example.Event", "Break", fields=(_jfield("cause", "net.example.Cause"),))
+    classes = {
+        "net.example.Widget": _jclass("Widget", fields=(_jfield("evt", "net.example.Event$Break"),)),
+        "net.example.Event": _jclass("Event", inner=(nested,)),
+        "net.example.Event$Break": nested,
+        "net.example.Cause": _jclass("Cause"),
+    }
+    reach = closure(("net.example.Widget",), wrapper=_Wrapper(classes), classloader=_Loader())
+    assert reach.classes == ("net.example.Cause", "net.example.Event", "net.example.Widget"), reach.classes
+    seeded = closure(("net.example.Event$Break",), wrapper=_Wrapper(classes), classloader=_Loader())
+    assert seeded.classes == ("net.example.Cause", "net.example.Event"), seeded.classes
+
+
+@check("a class the loader does not have is reported, and a cycle in the graph ends")
+def surface_closure_gaps() -> None:
+    classes = {
+        "net.example.Widget": _jclass(
+            "Widget",
+            fields=(_jfield("gone", "net.example.Gone"), _jfield("peer", "net.example.Peer")),
+        ),
+        "net.example.Peer": _jclass("Peer", methods=(_jmethod("widget", returns="net.example.Widget"),)),
+    }
+    reach = closure(("net.example.Widget",), wrapper=_Wrapper(classes), classloader=_Loader())
+    assert reach.classes == ("net.example.Peer", "net.example.Widget"), reach.classes
+    assert set(reach.missing) == {"net.example.Gone"}, reach.missing
+    assert "KeyError" in reach.missing["net.example.Gone"], reach.missing
+
+
+@check("a run renders the surface it is given, and the tree holds no class it did not reach")
+def surface_run_selects_the_corpus() -> None:
+    root = WORK / "stubs-surface"
+    classes = {
+        "net.example.Widget": _jclass(
+            "Widget",
+            bases=("net.example.Base",),
+            fields=(_jfield("gone", "net.example.Gone"),),
+        ),
+        "net.example.Base": _jclass("Base"),
+        "net.other.Stray": _jclass("Stray", package="net.other"),
+    }
+    generator = StubGenerator(root, wrapper=_Wrapper(classes), classloader=_Loader())
+    report = generator.generate_surface(("net.example.Widget",))
+    _ = generator.prune()
+    assert (root / "net/example/__init__.pyi").is_file()
+    assert not (root / "net/other").exists(), "a class nothing reaches has no stub"
+    assert sorted(report.outcomes) == ["net.example.Base", "net.example.Gone", "net.example.Widget"], report.as_dict()
+    assert report.outcomes["net.example.Gone"].status == "failed", report.as_dict()
+    assert "cannot be reached" in (report.outcomes["net.example.Gone"].reason or ""), report.as_dict()
+
+
+@check("the seeds are the names herecraft/api declares, the event wrappers among them")
+def surface_seeds() -> None:
+    seeds = declared_seeds()
+    assert "net.neoforged.neoforge.event.server.ServerStartingEvent" in seeds, seeds
+    assert "net.neoforged.neoforge.event.level.BlockEvent$BreakEvent" in seeds, seeds
+    assert seeds == sorted(set(seeds)), seeds
 
 
 def main() -> int:
