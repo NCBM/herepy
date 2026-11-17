@@ -15,6 +15,9 @@ from .overlay import CONSTRUCTOR, Overlay
 
 logger = getLogger("herecraft.stubgen.core")
 
+# The types whose JVM value takes two local slots, which is how a mapping file indexes a parameter.
+WIDE_TYPES: Final = frozenset({"long", "double"})
+
 BASIC_TYPE_MAPPING: Final[dict[str, str]] = {
     "void": "None",
     "byte": "int",
@@ -197,8 +200,14 @@ class Outcome:
 class StubReport:
     """What a run decided, class by class — the JSON the run leaves beside the stubs."""
 
+    outcomes: dict[str, Outcome]
+    named: int
+    documented: int
+
     def __init__(self) -> None:
-        self.outcomes: dict[str, Outcome] = {}
+        self.outcomes = {}
+        self.named = 0
+        self.documented = 0
 
     def record(self, name: str, outcome: Outcome) -> None:
         self.outcomes[name] = outcome
@@ -206,12 +215,19 @@ class StubReport:
     def update(self, outcomes: dict[str, Outcome]) -> None:
         self.outcomes.update(outcomes)
 
+    def merge(self, other: StubReport) -> None:
+        """Take another batch's outcomes and what it applied, so a run of two batches reports as one."""
+        self.outcomes.update(other.outcomes)
+        self.named += other.named
+        self.documented += other.documented
+
     def count(self, status: str) -> int:
         return sum(1 for outcome in self.outcomes.values() if outcome.status == status)
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "summary": {status: self.count(status) for status in ("written", "rejected", "failed")},
+            "applied": {"parameters": self.named, "docstrings": self.documented},
             "classes": {name: self.outcomes[name].as_dict() for name in sorted(self.outcomes)},
         }
 
@@ -257,6 +273,8 @@ class StubGenerator:
         self._wrapper: type[Any] = wrapper
         self._classloader: Any = classloader
         self._overlay: Overlay | None = overlay
+        self._named: int = 0
+        self._documented: int = 0
         self._modules: dict[Path, _Module] = {}
         self._written: set[Path] = set()
 
@@ -290,6 +308,7 @@ class StubGenerator:
         for name, rcls in reflected.items():
             by_file.setdefault(_output_path(self.output_dir, name), []).append((name, rcls))
 
+        named_before, documented_before = self._named, self._documented
         for path, entries in by_file.items():
             module = self._modules.setdefault(path, _Module())
             outcomes: dict[str, Outcome] = {}
@@ -307,6 +326,8 @@ class StubGenerator:
                 logger.info("Generated stub: %s -> %s", name, path)
             report.update(outcomes)
 
+        report.named = self._named - named_before
+        report.documented = self._documented - documented_before
         return report
 
     def _write_module(self, path: Path, module: _Module) -> str | None:
@@ -381,6 +402,7 @@ class StubGenerator:
 
         doc = self._class_doc(rcls)
         if doc:
+            self._documented += 1
             body.insert(0, _docstring(doc))
 
         return ast.ClassDef(
@@ -395,6 +417,32 @@ class StubGenerator:
     def _class_doc(self, rcls: Any) -> str:
         """The class's docstring text from the overlay, or "" when the data does not carry one."""
         return self._overlay.class_doc(rcls.getName()) if self._overlay is not None else ""
+
+    def _name_parameters(self, owner: str, name: str, member: Any, parameters: list[Any], *, static: bool) -> list[str]:
+        """One Python name per parameter: the data's name for its JVM slot, else the class file's, else `argN`.
+
+        The slot is what the mapping file keys a name by, so it is walked here: `0` is `this` unless the member is
+        static, and a `long` or a `double` takes two slots. A varargs parameter is an array reference, one slot,
+        whatever its component type is.
+        """
+        slots = self._overlay.parameter_names(owner, name, member.getDescriptor()) if self._overlay is not None else {}
+        names: list[str] = []
+        slot = 0 if static else 1
+        for index, parameter in enumerate(parameters):
+            found = slots.get(slot)
+            if found:
+                self._named += 1
+                chosen = found
+            elif parameter.isNamePresent():
+                chosen = parameter.getName()
+            else:
+                chosen = f"arg{index}"
+            if chosen in keyword.kwlist:
+                chosen = chosen + "_"
+            names.append(chosen)
+            wide = parameter.getType().getCanonicalName() in WIDE_TYPES
+            slot += 2 if wide and not parameter.isVarArg() else 1
+        return names
 
     def _method_doc(self, owner: str, member: Any, name: str) -> str:
         """A method's or constructor's docstring text, keyed by the name the data uses for it."""
@@ -449,10 +497,9 @@ class StubGenerator:
             if not m.isStatic():
                 posonlyargs.append(ast.arg("self"))
 
-            for i, p in enumerate(m.getParameters()):
-                param_name = p.getName() if p.isNamePresent() else f"arg{i}"
-                if param_name in keyword.kwlist:
-                    param_name = param_name + "_"
+            parameters = list(m.getParameters())
+            names = self._name_parameters(owner, m.getName(), m, parameters, static=m.isStatic())
+            for p, param_name in zip(parameters, names, strict=True):
                 ann = self._build_type_annotation(p.getType(), tracker, own_package)
                 if p.isVarArg():
                     vararg = ast.arg(param_name, ann)
@@ -470,6 +517,7 @@ class StubGenerator:
             doc = self._method_doc(owner, m, m.getName())
             if doc and doc not in documented:
                 documented.add(doc)
+                self._documented += 1
                 body.append(_docstring(doc))
             body.append(ast.Expr(ast.Constant(...)))
 
@@ -509,10 +557,9 @@ class StubGenerator:
             args: list[ast.arg] = [ast.arg("self")]
             vararg: ast.arg | None = None
 
-            for i, p in enumerate(ctor.getParameters()):
-                param_name = p.getName() if p.isNamePresent() else f"arg{i}"
-                if param_name in keyword.kwlist:
-                    param_name = param_name + "_"
+            parameters = list(ctor.getParameters())
+            names = self._name_parameters(owner, CONSTRUCTOR, ctor, parameters, static=False)
+            for p, param_name in zip(parameters, names, strict=True):
                 ann = self._build_type_annotation(p.getType(), tracker, own_package)
                 if p.isVarArg():
                     vararg = ast.arg(param_name, ann)
@@ -524,6 +571,7 @@ class StubGenerator:
                 doc = self._method_doc(owner, ctor, CONSTRUCTOR)
                 if doc:
                     documented = True
+                    self._documented += 1
                     body.append(_docstring(doc))
             body.append(ast.Expr(ast.Constant(...)))
 
