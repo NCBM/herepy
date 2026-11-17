@@ -1,5 +1,6 @@
 package top.nhanchou.herepy.reflective;
 
+import java.lang.invoke.MethodType;
 import java.lang.reflect.*;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -131,6 +132,14 @@ public class ReflectWrapper {
                     .map(ReflectTypeVariable::new)
                     .collect(Collectors.toList());
         }
+
+        /**
+         * The JVM descriptor, e.g. {@code (ILnet/minecraft/core/BlockPos;)V}. It separates two overloads that a
+         * name cannot, and it is the key a mappings file publishes parameter names and docs under.
+         */
+        public String getDescriptor() {
+            return MethodType.methodType(method.getReturnType(), method.getParameterTypes()).descriptorString();
+        }
     }
 
     // ===== ReflectField =====
@@ -183,6 +192,11 @@ public class ReflectWrapper {
             return Arrays.stream(constructor.getTypeParameters())
                     .map(ReflectTypeVariable::new)
                     .collect(Collectors.toList());
+        }
+
+        /** The JVM descriptor a mapping file keys a constructor by, spelled {@code <init>} there. */
+        public String getDescriptor() {
+            return MethodType.methodType(void.class, constructor.getParameterTypes()).descriptorString();
         }
     }
 
