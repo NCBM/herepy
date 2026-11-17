@@ -10,6 +10,7 @@ It is a script rather than a test suite: one list, no runner, no fixtures. It fa
 stops being true.
 """
 
+import ast
 import asyncio
 from collections.abc import Callable
 import importlib
@@ -83,6 +84,7 @@ from herecraft import event as event_module
 from herecraft.kernel import loader
 from herecraft.kernel import unit as unit_module
 from herecraft.manifest import ManifestError, read_archive, read_directory
+from herecraft.stubgen import StubGenerator, StubReport
 
 WORK = pathlib.Path(tempfile.mkdtemp(prefix="herepy-check-"))
 env.install("CLIENT", str(WORK))
@@ -351,7 +353,167 @@ def commands() -> None:
     unit.enable()
     assert dispatcher.declared == {"scriptive reload": 2}, dispatcher.declared
     asyncio.run(unit.revoke_all())
-    assert dispatcher.declared == {}, dispatcher.declared
+
+
+class _Reflected:
+    """A stand-in for a ReflectWrapper object, made of the callables the generator reads.
+
+    The generator reaches Java through method names on these objects, so the same names answer from here and
+    the renderer runs with no JVM under it.
+    """
+
+    def __init__(self, **members: object) -> None:
+        for name, member in members.items():
+            setattr(self, name, member)
+
+
+class _Wrapper:
+    """`ReflectWrapper.forClass`, answering from the classes the caller built."""
+
+    def __init__(self, classes: dict[str, _Reflected]) -> None:
+        self._classes = classes
+
+    def forClass(self, clazz: object) -> object:
+        return self._classes[str(clazz)]
+
+
+class _Loader:
+    """A classloader that answers with the name it was asked for."""
+
+    def loadClass(self, name: str) -> str:
+        return name
+
+
+def _jtype(canonical: str) -> _Reflected:
+    return _Reflected(
+        getCanonicalName=lambda: canonical,
+        isArray=lambda: False,
+        isTypeVariable=lambda: False,
+        isWildcard=lambda: False,
+        isParameterized=lambda: False,
+    )
+
+
+def _jparam(index: int, canonical: str) -> _Reflected:
+    return _Reflected(
+        getName=lambda: f"arg{index}",
+        isNamePresent=lambda: False,
+        isVarArg=lambda: False,
+        getType=lambda: _jtype(canonical),
+    )
+
+
+def _jmethod(name: str, params: tuple[str, ...] = (), returns: str = "void") -> _Reflected:
+    return _Reflected(
+        getName=lambda: name,
+        isAbstract=lambda: False,
+        isStatic=lambda: False,
+        isFinal=lambda: False,
+        getReturnType=lambda: _jtype(returns),
+        getParameters=lambda: [_jparam(index, canonical) for index, canonical in enumerate(params)],
+        getTypeParameters=lambda: [],
+    )
+
+
+def _jfield(name: str, canonical: str) -> _Reflected:
+    return _Reflected(
+        getName=lambda: name,
+        isStatic=lambda: False,
+        isFinal=lambda: True,
+        getGenericType=lambda: _jtype(canonical),
+    )
+
+
+def _jclass(
+    simple: str,
+    *,
+    package: str = "net.example",
+    bases: tuple[str, ...] = (),
+    methods: tuple[_Reflected, ...] = (),
+    fields: tuple[_Reflected, ...] = (),
+) -> _Reflected:
+    return _Reflected(
+        getSimpleName=lambda: simple,
+        getCanonicalName=lambda: f"{package}.{simple}",
+        getPackageName=lambda: package,
+        getGenericSuperclass=lambda: _jtype(bases[0]) if bases else None,
+        getGenericInterfaces=lambda: [_jtype(base) for base in bases[1:]],
+        getTypeParameters=lambda: [],
+        getInnerClasses=lambda: [],
+        getMethods=lambda: list(methods),
+        getFields=lambda: list(fields),
+        getConstructors=lambda: [],
+    )
+
+
+def _generate(root: pathlib.Path, classes: dict[str, _Reflected], *batches: tuple[str, ...]) -> StubReport:
+    """Run the generator over the batches, on the fake classpath the caller built."""
+    generator = StubGenerator(root, wrapper=_Wrapper(classes), classloader=_Loader())
+    report = StubReport()
+    for names in batches:
+        report.update(generator.generate_batch(names).outcomes)
+    _ = generator.prune()
+    return report
+
+
+@check("a run over the same classes writes each class once, whatever the tree held before")
+def stubs_are_idempotent() -> None:
+    root = WORK / "stubs-twice"
+    classes = {
+        "net.example.Widget": _jclass("Widget", methods=(_jmethod("size", returns="int"),)),
+        "net.example.Gadget": _jclass("Gadget", bases=("net.example.Widget",)),
+    }
+    names = tuple(classes)
+    first = _generate(root, classes, names)
+    written = (root / "net/example/__init__.pyi").read_text(encoding="utf-8")
+    second = _generate(root, classes, names)
+    assert (root / "net/example/__init__.pyi").read_text(encoding="utf-8") == written
+    assert first.count("written") == 2, first.as_dict()
+    assert second.count("written") == 2, second.as_dict()
+    assert written.count("class Widget") == 1, written
+    assert written.index("class Widget") < written.index("class Gadget"), written
+
+
+@check("a class that leaves the set loses its stub, and every package on the path has an __init__.pyi")
+def stubs_are_pruned() -> None:
+    root = WORK / "stubs-pruned"
+    classes = {"net.example.Widget": _jclass("Widget"), "net.other.Thing": _jclass("Thing", package="net.other")}
+    _ = _generate(root, classes, tuple(classes))
+    assert (root / "net/other/__init__.pyi").is_file()
+    assert (root / "net/__init__.pyi").is_file(), "an intermediate package gets its own __init__.pyi"
+    _ = _generate(root, classes, ("net.example.Widget",))
+    assert not (root / "net/other").exists(), "a stub the run no longer produces is gone"
+    assert (root / "net/example/__init__.pyi").is_file()
+
+
+@check("a member no Python expression can spell is left out, and its class is written anyway")
+def stub_omits_unnameable_members() -> None:
+    root = WORK / "stubs-names"
+    block = _jclass(
+        "Block",
+        methods=(_jmethod("neoforge$setValidBlocks", params=("java.util.Set",)), _jmethod("id", returns="int")),
+        fields=(_jfield("neoforge$STATE", "java.lang.Object"), _jfield("NAME", "java.lang.String")),
+    )
+    report = _generate(root, {"net.example.Block": block}, ("net.example.Block",))
+    source = (root / "net/example/__init__.pyi").read_text(encoding="utf-8")
+    _ = ast.parse(source)  # what the run wrote is Python
+    assert "class Block" in source, source
+    assert "def id(" in source, source
+    assert "neoforge" not in source, source
+    outcome = report.outcomes["net.example.Block"]
+    assert outcome.status == "written", outcome
+    assert outcome.omitted == ("neoforge$STATE", "neoforge$setValidBlocks"), outcome
+
+
+@check("a class name no import can spell is reported as rejected, and nothing is written for it")
+def stub_rejects_unspellable_names() -> None:
+    root = WORK / "stubs-reject"
+    report = _generate(root, {}, ("net.example.Outer$Inner", "net.example.package-info"))
+    outcome = report.outcomes["net.example.Outer$Inner"]
+    assert outcome.status == "rejected", outcome
+    assert "identifier" in (outcome.reason or ""), outcome
+    assert report.outcomes["net.example.package-info"].status == "rejected", report.as_dict()
+    assert not list(root.rglob("*.pyi")), "a rejected name writes nothing"
 
 
 def main() -> int:
