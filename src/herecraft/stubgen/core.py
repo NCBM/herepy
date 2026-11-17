@@ -329,8 +329,10 @@ class StubGenerator:
             by_file.setdefault(_output_path(self.output_dir, name), []).append((name, rcls))
 
         named_before, documented_before = self._named, self._documented
+        for path in by_file:
+            _ = self._modules.setdefault(path, _Module())
         for path, entries in by_file.items():
-            module = self._modules.setdefault(path, _Module())
+            module = self._modules[path]
             outcomes: dict[str, Outcome] = {}
             for name, rcls in _topo_sort(entries):
                 class_def = self._build_class(rcls, module.tracker, rcls.getPackageName())
@@ -362,7 +364,9 @@ class StubGenerator:
         parent = path.parent
         while parent != self.output_dir and self.output_dir in parent.parents:
             init = parent / "__init__.pyi"
-            if not init.exists():
+            if init not in self._written and init not in self._modules:
+                # A package with no module of its own holds the marker an import needs, and no class: an
+                # earlier run's copy is not this run's, so it goes the way the module above it would.
                 _ = init.write_text("", encoding="utf-8")
             self._written.add(init)
             parent = parent.parent
