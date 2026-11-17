@@ -897,6 +897,20 @@ def surface_seeds() -> None:
     assert seeds == sorted(set(seeds)), seeds
 
 
+@check("a package that holds no class of its own holds only the marker, whatever an earlier run left there")
+def stale_package_marker_is_replaced() -> None:
+    root = WORK / "stubs-marker"
+    marker = root / "net/other/__init__.pyi"
+    marker.parent.mkdir(parents=True)
+    _ = marker.write_text("class Leftover: ...\n", encoding="utf-8")
+    classes = {"net.other.deep.Thing": _jclass("Thing", package="net.other.deep")}
+    _ = _generate(root, classes, ("net.other.deep.Thing",))
+    assert marker.read_text(encoding="utf-8") == "", "a package above the classes is a marker and nothing else"
+    assert (root / "net/other/deep/__init__.pyi").is_file()
+    _ = _generate(root, classes, ("net.other.deep.Thing",))
+    assert marker.read_text(encoding="utf-8") == "", marker.read_text(encoding="utf-8")
+
+
 def main() -> int:
     failures = 0
     for what, case in CHECKS:
