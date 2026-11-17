@@ -11,6 +11,8 @@ from logging import getLogger
 from pathlib import Path
 from typing import Any, Final, Literal
 
+from .overlay import CONSTRUCTOR, Overlay
+
 logger = getLogger("herecraft.stubgen.core")
 
 BASIC_TYPE_MAPPING: Final[dict[str, str]] = {
@@ -236,8 +238,12 @@ class StubGenerator:
         *,
         wrapper: type[Any] | None = None,
         classloader: Any = None,
+        overlay: Overlay | None = None,
     ) -> None:
-        """`wrapper` and `classloader` are what the reflection reaches through; both default to the game's."""
+        """`wrapper` and `classloader` are what the reflection reaches through; both default to the game's.
+
+        `overlay` is the data the class files do not carry: parameter names and docstrings (ADR 0021).
+        """
         self.output_dir = Path(output_dir)
         if wrapper is None:
             from herecraft._internals.javans import ReflectWrapper
@@ -250,6 +256,7 @@ class StubGenerator:
             classloader = Thread.currentThread().getContextClassLoader()
         self._wrapper: type[Any] = wrapper
         self._classloader: Any = classloader
+        self._overlay: Overlay | None = overlay
         self._modules: dict[Path, _Module] = {}
         self._written: set[Path] = set()
 
@@ -358,11 +365,11 @@ class StubGenerator:
         for method in rcls.getMethods():
             methods_by_name.setdefault(method.getName(), []).append(method)
         for methods in methods_by_name.values():
-            body.extend(self._build_method(methods, tracker, own_package))
+            body.extend(self._build_method(rcls.getName(), methods, tracker, own_package))
 
         constructors = list(rcls.getConstructors())
         if constructors:
-            body.extend(self._build_constructor(constructors, tracker, own_package))
+            body.extend(self._build_constructor(rcls.getName(), constructors, tracker, own_package))
 
         # Inject JEP-provided dunder methods for patched interfaces
         canonical = rcls.getCanonicalName()
@@ -372,6 +379,10 @@ class StubGenerator:
         if not body:
             body.append(ast.Expr(ast.Constant(...)))
 
+        doc = self._class_doc(rcls)
+        if doc:
+            body.insert(0, _docstring(doc))
+
         return ast.ClassDef(
             name=class_name,
             bases=bases,
@@ -380,6 +391,16 @@ class StubGenerator:
             decorator_list=[],
             type_params=type_params,
         )
+
+    def _class_doc(self, rcls: Any) -> str:
+        """The class's docstring text from the overlay, or "" when the data does not carry one."""
+        return self._overlay.class_doc(rcls.getName()) if self._overlay is not None else ""
+
+    def _method_doc(self, owner: str, member: Any, name: str) -> str:
+        """A method's or constructor's docstring text, keyed by the name the data uses for it."""
+        if self._overlay is None:
+            return ""
+        return self._overlay.method_doc(owner, name, member.getDescriptor())
 
     def _build_field(self, field: Any, tracker: _ImportTracker, own_package: str) -> ast.AnnAssign:
         name = field.getName()
@@ -402,9 +423,12 @@ class StubGenerator:
             simple=1,
         )
 
-    def _build_method(self, methods: list[Any], tracker: _ImportTracker, own_package: str) -> list[ast.FunctionDef]:
+    def _build_method(
+        self, owner: str, methods: list[Any], tracker: _ImportTracker, own_package: str
+    ) -> list[ast.FunctionDef]:
         result: list[ast.FunctionDef] = []
         has_overload = len(methods) > 1
+        documented: set[str] = set()
 
         for m in methods:
             decorators: list[ast.expr] = []
@@ -442,6 +466,13 @@ class StubGenerator:
             if name in keyword.kwlist:
                 name = "___use_getattr_to_access_" + name
 
+            body: list[ast.stmt] = []
+            doc = self._method_doc(owner, m, m.getName())
+            if doc and doc not in documented:
+                documented.add(doc)
+                body.append(_docstring(doc))
+            body.append(ast.Expr(ast.Constant(...)))
+
             result.append(
                 ast.FunctionDef(
                     name=name,
@@ -453,7 +484,7 @@ class StubGenerator:
                         kw_defaults=[],
                         defaults=[],
                     ),
-                    body=[ast.Expr(ast.Constant(...))],
+                    body=body,
                     decorator_list=decorators,
                     returns=returns,
                     type_params=type_params,
@@ -463,10 +494,11 @@ class StubGenerator:
         return result
 
     def _build_constructor(
-        self, constructors: list[Any], tracker: _ImportTracker, own_package: str
+        self, owner: str, constructors: list[Any], tracker: _ImportTracker, own_package: str
     ) -> list[ast.FunctionDef]:
         result: list[ast.FunctionDef] = []
         has_overload = len(constructors) > 1
+        documented = False
 
         for ctor in constructors:
             decorators: list[ast.expr] = []
@@ -487,6 +519,14 @@ class StubGenerator:
                 else:
                     args.append(ast.arg(param_name, ann))
 
+            body: list[ast.stmt] = []
+            if not documented:
+                doc = self._method_doc(owner, ctor, CONSTRUCTOR)
+                if doc:
+                    documented = True
+                    body.append(_docstring(doc))
+            body.append(ast.Expr(ast.Constant(...)))
+
             result.append(
                 ast.FunctionDef(
                     name="__init__",
@@ -498,7 +538,7 @@ class StubGenerator:
                         kw_defaults=[],
                         defaults=[],
                     ),
-                    body=[ast.Expr(ast.Constant(...))],
+                    body=body,
                     decorator_list=decorators,
                     returns=ast.Name("None"),
                     type_params=[],
@@ -689,6 +729,11 @@ def _is_stubgable(java_class_name: str) -> bool:
     simple = java_class_name.rsplit(".", 1)[-1]
     # package-info, module-info, and any name with hyphens are invalid Python identifiers
     return simple.isidentifier() and not keyword.iskeyword(simple)
+
+
+def _docstring(text: str) -> ast.Expr:
+    """A docstring: the first statement of a class or of a function."""
+    return ast.Expr(ast.Constant(text))
 
 
 def _render(module: _Module) -> str:
